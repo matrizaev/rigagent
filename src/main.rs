@@ -23,8 +23,18 @@
 )]
 #![warn(clippy::pedantic, clippy::nursery, clippy::cargo)]
 
+use std::process::ExitCode;
+
+use tokio::io::AsyncWriteExt;
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    rigagent::run().await?;
-    Ok(())
+async fn main() -> ExitCode {
+    match rigagent::run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            let mut stderr = tokio::io::stderr();
+            stderr.write_all(format!("{error}\n").as_bytes()).await.ok();
+            error.exit_code()
+        }
+    }
 }

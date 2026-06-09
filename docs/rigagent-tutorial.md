@@ -1,476 +1,193 @@
-# Build a Concise RigAgent Demo in Rust
+# Run the Retail Replenishment Agent
 
-This tutorial builds a terminal support agent with:
+This tutorial walks through the autonomous retail replenishment workflow in this
+repository. The binary seeds a small apparel shop, advances deterministic sales
+simulation, asks a Rig-backed decision agent for replenishment proposals, and
+persists accepted restock orders through Diesel.
 
-- OpenAI chat and embeddings through Rig.
-- RAG over support documents stored in SQLite.
-- Deterministic tools for listing orders and looking up order status.
-- YAML configuration with environment-variable overrides.
-- A small interactive terminal REPL.
+The first screen is the workflow itself:
 
-The design deliberately supports one provider. Removing runtime provider
-switching keeps configuration, agent construction, tests, and documentation
-small. Add more providers only when the application actually needs them.
+```bash
+cargo run
+```
+
+With no subcommand, the binary prints command help and performs no mutation.
 
 ## Architecture
 
 ```text
 rigagent/
 ├── config.yaml
-├── data/knowledge_base.json
-├── src/
-│   ├── main.rs
-│   ├── lib.rs
-│   ├── config.rs
-│   ├── knowledge.rs
-│   ├── rag.rs
-│   ├── tools.rs
-│   └── repl.rs
-└── .env
+├── data/
+│   └── retail_scenario.yaml
+├── migrations/
+└── src/
+    ├── application/retail/
+    ├── domain/retail/
+    ├── infrastructure/
+    │   ├── agents/rig_replenishment/
+    │   ├── persistence/
+    │   ├── scenario/
+    │   └── ids.rs
+    └── interfaces/cli.rs
 ```
 
-Responsibilities:
+The layers are intentionally narrow:
 
-- `config.rs`: deserialize YAML, then apply environment overrides.
-- `knowledge.rs`: define searchable documents and their SQLite schema.
-- `rag.rs`: embed documents and expose a SQLite vector index.
-- `tools.rs`: deterministic order listing and status lookup.
-- `repl.rs`: retain chat history and process terminal commands.
-- `lib.rs`: construct and run the agent.
+- `domain/retail`: products, inventory, sales, restock orders, decision runs,
+  value objects, and deterministic scoring rules.
+- `application/retail`: workflow commands, use cases, ports, validation, and
+  transaction-oriented orchestration.
+- `infrastructure/persistence`: Diesel adapters and embedded migrations.
+- `infrastructure/scenario`: YAML seed-data loader.
+- `infrastructure/agents/rig_replenishment`: Rig/OpenAI decision adapter and
+  per-decision tools.
+- `interfaces/cli`: Clap command parsing, config loading, adapter assembly, and
+  user-facing command summaries.
 
-## 1. Create the Project
+Domain code does not depend on Diesel, Rig, Clap, environment variables, async
+runtimes, or provider payloads.
 
-```bash
-cargo new rigagent
-cd rigagent
-mkdir -p data
-```
+## Configure the Demo
 
-Use these dependencies:
-
-```toml
-[dependencies]
-anyhow = "1"
-clap = { version = "4", features = ["derive"] }
-config = { version = "0.15", default-features = false, features = ["yaml"] }
-dotenvy = "0.15"
-rig = { package = "rig-core", version = "0.38.1", features = ["derive"] }
-rig-sqlite = "0.38.1"
-rusqlite = { version = "0.32", features = ["bundled"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sqlite-vec = "0.1"
-tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt-multi-thread"] }
-tokio-rusqlite = { version = "0.6", features = ["bundled"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-```
-
-Key choices:
-
-- `config` replaces manual environment parsing.
-- Rig's `derive` feature enables `#[tool_macro]`, which generates tool schemas
-  and `Tool` implementations.
-- `rig-sqlite` is a companion crate; Rig core has no SQLite feature.
-
-## 2. Configure the Application
-
-Create `config.yaml` for non-secret defaults:
+`config.yaml` contains non-secret defaults:
 
 ```yaml
-chat_model: gpt-4o-mini
-embedding_model: text-embedding-3-small
-rag_db_path: data/agent.sqlite
-rag_top_k: 3
+chat_model: gpt-5-nano
+retail_db_path: data/retail.sqlite
+retail_scenario_path: data/retail_scenario.yaml
+decision_horizon_days: 14
+max_restock_orders_per_decision: 2
 ```
 
-Create `.env` for secrets:
+Set an OpenAI key only for commands that invoke the decision agent:
 
 ```env
 OPENAI_API_KEY=sk-your-key
 ```
 
-Any environment variable can override the matching YAML field:
+`seed` and `simulate` do not need `OPENAI_API_KEY`. `decide` and `run-cycle`
+require it because they construct the Rig-backed decision adapter.
+
+Any matching environment variable can override a YAML field:
 
 ```bash
-CHAT_MODEL=gpt-4o RAG_TOP_K=5 cargo run
+CHAT_MODEL=gpt-5-mini cargo run -- decide --horizon-days 14
 ```
 
-Ignore secrets and generated DB files:
+Generated local state is ignored by Git:
 
 ```gitignore
-/target
+data/retail.sqlite*
 .env
-data/agent.sqlite*
 ```
 
-### Typed Config Loader
+## Seed Retail State
 
-Create `src/config.rs`:
-
-```rust
-use std::{num::NonZeroUsize, path::PathBuf};
-
-use ::config::{Config, Environment, File};
-use serde::Deserialize;
-
-#[derive(Clone, Deserialize)]
-pub struct AppConfig {
-    pub openai_api_key: String,
-    pub chat_model: String,
-    pub embedding_model: String,
-    pub rag_db_path: PathBuf,
-    pub rag_top_k: NonZeroUsize,
-}
-
-impl AppConfig {
-    pub fn load() -> Result<Self, ::config::ConfigError> {
-        Config::builder()
-            .add_source(File::with_name("config"))
-            .add_source(
-                Environment::default()
-                    .ignore_empty(true)
-                    .try_parsing(true),
-            )
-            .build()?
-            .try_deserialize()
-    }
-}
-```
-
-Sources are merged in order. YAML loads first; environment variables override
-it. Because `openai_api_key` is absent from YAML, startup fails when
-`OPENAI_API_KEY` is missing.
-
-`NonZeroUsize` also rejects `RAG_TOP_K=0` during deserialization.
-
-## 3. Add Support Documents
-
-Create `data/knowledge_base.json`:
-
-```json
-[
-  {
-    "id": "returns-accessories",
-    "title": "Accessory Return Policy",
-    "source": "support/policies/returns.md",
-    "category": "policy",
-    "content": "Accessories can be returned within 45 days of purchase."
-  },
-  {
-    "id": "shipping-timeline",
-    "title": "Shipping Timeline",
-    "source": "support/fulfillment/shipping.md",
-    "category": "shipping",
-    "content": "Standard shipping usually leaves the warehouse within two business days."
-  }
-]
-```
-
-These are static support documents for RAG. Order information comes from a
-tool, not this knowledge base.
-
-## 4. Define Searchable Documents
-
-Create `src/knowledge.rs`:
-
-```rust
-use rig::Embed;
-use rig_sqlite::{Column, ColumnValue, SqliteVectorStoreTable};
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Default, Deserialize, Embed, Serialize)]
-pub struct SupportDoc {
-    pub id: String,
-    pub title: String,
-    pub source: String,
-    pub category: String,
-    #[embed]
-    pub content: String,
-}
-
-impl SqliteVectorStoreTable for SupportDoc {
-    fn name() -> &'static str {
-        "support_docs"
-    }
-
-    fn schema() -> Vec<Column> {
-        vec![
-            Column::new("id", "TEXT PRIMARY KEY"),
-            Column::new("title", "TEXT"),
-            Column::new("source", "TEXT"),
-            Column::new("category", "TEXT").indexed(),
-            Column::new("content", "TEXT"),
-        ]
-    }
-
-    fn id(&self) -> String {
-        self.id.clone()
-    }
-
-    fn column_values(&self) -> Vec<(&'static str, Box<dyn ColumnValue>)> {
-        vec![
-            ("id", Box::new(self.id.clone())),
-            ("title", Box::new(self.title.clone())),
-            ("source", Box::new(self.source.clone())),
-            ("category", Box::new(self.category.clone())),
-            ("content", Box::new(self.content.clone())),
-        ]
-    }
-}
-```
-
-Only `content` has `#[embed]`. Remaining fields are metadata available to the
-model after retrieval.
-
-## 5. Build the SQLite Vector Index
-
-The RAG startup flow is:
-
-1. Register the `sqlite-vec` extension before opening SQLite.
-2. Open `data/agent.sqlite`.
-3. Create the document and vector tables.
-4. Embed seed docs when the table is empty.
-5. Return a vector index for agent dynamic context.
-
-Core code from `src/rag.rs`:
-
-```rust
-pub async fn prepare_index(
-    config: &AppConfig,
-    embedding_model: openai::EmbeddingModel,
-    reindex: bool,
-) -> anyhow::Result<SupportIndex> {
-    initialize_sqlite_vec()?;
-
-    if reindex && config.rag_db_path.exists() {
-        std::fs::remove_file(&config.rag_db_path)?;
-    }
-
-    let conn = tokio_rusqlite::Connection::open(&config.rag_db_path).await?;
-    let count_conn = conn.clone();
-    let store: SqliteVectorStore<_, SupportDoc> =
-        SqliteVectorStore::new(conn, &embedding_model).await?;
-
-    if support_doc_count(&count_conn).await? == 0 {
-        let docs: Vec<SupportDoc> =
-            serde_json::from_str(&std::fs::read_to_string("data/knowledge_base.json")?)?;
-
-        let embeddings = EmbeddingsBuilder::new(embedding_model.clone())
-            .documents(docs)?
-            .build()
-            .await?;
-
-        store.add_rows(embeddings).await?;
-    }
-
-    Ok(store.index(embedding_model))
-}
-```
-
-`sqlite-vec` requires a small unsafe registration wrapper because it exposes a C
-extension initializer. Keep that isolated in `initialize_sqlite_vec`; see the
-complete implementation in [`src/rag.rs`](../src/rag.rs).
-
-Use `--reindex` after changing seed docs:
+Create or replace durable retail state from the scenario YAML:
 
 ```bash
-cargo run -- --reindex
+cargo run -- seed --reset
 ```
 
-## 6. Add Deterministic Tools
+The seed command runs embedded Diesel migrations, clears prior retail state when
+`--reset` is passed, then loads `data/retail_scenario.yaml`. The scenario defines
+the shop start date, stock-space capacity, product catalog, initial inventory,
+demand rates, restock lead times, and order bounds.
 
-Tools perform operations where model guesses are unacceptable:
-
-- Listing valid demo order IDs.
-- Order status lookup.
-- Live API or database reads.
-
-### Generate Tools with `#[tool_macro]`
-
-Rig 0.38.1 can generate the argument schema, tool type, and `Tool`
-implementation from a normal function:
-
-```rust
-use rig::{tool::ToolError, tool_macro};
-use serde::Serialize;
-
-#[derive(Serialize)]
-pub struct OrderStatus {
-    pub order_id: String,
-    pub found: bool,
-    pub status: Option<String>,
-}
-
-#[tool_macro(description = "List existing order IDs.")]
-pub fn list_orders() -> Result<Vec<String>, ToolError> {
-    Ok(vec![
-        "RIG-1001".to_string(),
-        "RIG-1002".to_string(),
-        "RIG-1003".to_string(),
-    ])
-}
-
-#[tool_macro(
-    description = "Look up a demo order and return its current fulfillment status.",
-    params(order_id = "Demo order id such as RIG-1001, RIG-1002, or RIG-1003.")
-)]
-pub fn lookup_order_status(order_id: String) -> Result<OrderStatus, ToolError> {
-    // Match the order id or call a real order service.
-    todo!()
-}
-```
-
-The macros generate `ListOrders` and `LookupOrderStatus` tool types. Register
-both with the agent:
-
-```rust
-.tool(tools::LookupOrderStatus)
-.tool(tools::ListOrders)
-```
-
-The model can call `list_orders` when the user does not know a valid demo order
-ID, then pass one of those IDs to `lookup_order_status`. The lookup matches
-`RIG-1001`, `RIG-1002`, and `RIG-1003`. Replace the tools' internals with a real
-database or HTTP client later without changing their model-facing contracts.
-
-See the complete tools in [`src/tools.rs`](../src/tools.rs).
-
-## 7. Build the Agent
-
-Create `src/lib.rs`. The central wiring is short because chat and embeddings
-both use OpenAI:
-
-```rust
-let config = AppConfig::load()?;
-
-let openai = openai::Client::new(config.openai_api_key.clone())?;
-let embedding_model = openai.embedding_model(config.embedding_model.clone());
-let index = rag::prepare_index(&config, embedding_model, cli.reindex).await?;
-
-let agent = openai
-    .agent(config.chat_model.clone())
-    .preamble(repl::AGENT_PREAMBLE)
-    .dynamic_context(config.rag_top_k.get(), index)
-    .tool(tools::LookupOrderStatus)
-    .tool(tools::ListOrders)
-    .build();
-
-repl::run(agent).await?;
-```
-
-The preamble tells the model when to retrieve docs and when to call tools:
+Expected output looks like:
 
 ```text
-Use retrieved support documents when relevant.
-Call lookup_order_status for order status, tracking, carrier, or fulfillment questions.
-Call list_orders to see valid order ids for lookup_order_status.
-Cite support document title and source when retrieved context informs an answer.
-If context or tools do not contain the answer, say what is missing.
+seeded retail state from data/retail_scenario.yaml (reset: true)
 ```
 
-## 8. Add the Terminal REPL
+## Simulate Sales
 
-Rig's `Chat` trait appends user, assistant, and tool messages to a mutable chat
-history:
-
-```rust
-pub async fn run<A>(agent: A) -> anyhow::Result<()>
-where
-    A: rig::completion::Chat,
-{
-    let stdin = tokio::io::BufReader::new(tokio::io::stdin());
-    let mut lines = stdin.lines();
-    let mut history = Vec::new();
-
-    while let Some(line) = lines.next_line().await? {
-        match line.trim() {
-            "/quit" => break,
-            "" => continue,
-            prompt => println!("{}", agent.chat(prompt, &mut history).await?),
-        }
-    }
-
-    Ok(())
-}
-```
-
-The complete REPL adds `/help`, async stdout writes, and
-user-friendly error handling. See [`src/repl.rs`](../src/repl.rs).
-
-Keep `src/main.rs` minimal:
-
-```rust
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    rigagent::run().await
-}
-```
-
-## 9. Run the Demo
-
-Create `.env`:
+Advance the deterministic simulation without calling a model:
 
 ```bash
-cp .env.example .env
+cargo run -- simulate --days 7
 ```
 
-Add a real OpenAI key, then build the initial vector index:
+For each simulated day, the application service:
 
-```bash
-RUST_LOG=info cargo run -- --reindex
-```
+- Receives supplier restocks whose ETA is due.
+- Computes deterministic demand from each product demand rate.
+- Records fulfilled and lost sales.
+- Updates inventory and carried fractional demand backlog.
+- Advances the logical shop date.
 
-Try:
+The command prints a concise operational summary:
 
 ```text
-What is the return policy for accessories?
-Which orders can I look up?
-Where is order RIG-1001?
+advanced 7 day(s) to 2026-06-16; received 0 restock order(s), recorded 28 sale(s), lost 0 unit(s)
 ```
 
-Expected behavior:
+## Run One Replenishment Decision
 
-- Policy questions retrieve support docs from SQLite.
-- Questions about available demo orders call `list_orders`.
-- Order questions call `lookup_order_status`.
-
-## 10. Test and Validate
-
-Run:
+Run one autonomous decision turn:
 
 ```bash
-cargo fmt --all --check
+cargo run -- decide --horizon-days 14
+```
+
+This command requires `OPENAI_API_KEY`. It creates a decision run, gathers the
+current retail snapshot, scores deterministic restock options, and invokes the
+Rig-backed adapter. The adapter exposes implementation-detail tools to the
+model:
+
+- `get_inventory_snapshot`
+- `list_open_restock_orders`
+- `analyze_restock_options`
+- `place_restock_order`
+- `get_profit_summary`
+
+The tools operate on an in-memory `DecisionSession`. They do not write directly
+to Diesel. `place_restock_order` records proposed orders in the session after
+basic validation. The application use case then validates proposals again
+against domain rules, persists accepted orders in one transaction, and completes
+or fails the decision run.
+
+The decision prompt asks the model to inspect inventory, ranked options, open
+inbound orders, and profit summary; propose no more than the configured maximum;
+include SKU, quantity, and rationale for each proposal; and prefer high expected
+gross profit per space unit while avoiding duplicate inbound orders and capacity
+overflow.
+
+## Run an Autonomous Cycle
+
+Run repeated simulation and decision steps:
+
+```bash
+cargo run -- run-cycle --days 30 --decision-interval-days 7
+```
+
+This command also requires `OPENAI_API_KEY`. It runs an initial restock decision,
+then advances the simulation one day at a time and runs another decision each
+time the simulated day count reaches the configured interval.
+
+The workflow is autonomous: it does not open a chat session and does not require
+operator input between decisions.
+
+## Useful Checks
+
+Run these before handing back changes:
+
+```bash
+cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 cargo run -- --help
+cargo run -- seed --reset
+cargo run -- simulate --days 3
 ```
 
-High-value tests:
+With a valid `OPENAI_API_KEY`, also run:
 
-- Environment variables override YAML.
-- Missing `OPENAI_API_KEY` fails configuration.
-- Listing orders returns the valid demo order IDs.
-- Known and unknown order IDs return correct results.
+```bash
+cargo run -- decide --horizon-days 14
+cargo run -- run-cycle --days 14 --decision-interval-days 7
+```
 
-## Where to Simplify Further
-
-This demo still contains some unavoidable integration code:
-
-- `SqliteVectorStoreTable` requires explicit columns and values.
-- `sqlite-vec` requires extension registration.
-
-Do not hide those boundaries behind broad utilities. They are useful places to
-see what crosses into SQLite or the model.
-
-For a production app, replace hardcoded order data with an infrastructure
-adapter while keeping the model-facing tool contract stable.
-
-## References
-
-- Rig core: https://docs.rs/rig-core/latest/rig/
-- Rig tool macro: https://docs.rs/rig-core/latest/rig/attr.tool_macro.html
-- Rig tools: https://docs.rs/rig-core/latest/rig/tool/trait.Tool.html
-- Rig dynamic context: https://docs.rs/rig-core/latest/rig/agent/index.html
-- Rig-SQLite: https://docs.rs/rig-sqlite/latest/rig_sqlite/
-- config-rs: https://docs.rs/config/latest/config/
+For local experimentation, reseed with `--reset` whenever you want to return the
+database to the scenario baseline.

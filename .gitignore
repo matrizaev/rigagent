@@ -1,4 +1,3 @@
 /target
 .env
-data/agent.sqlite*
 data/retail.sqlite*

@@ -23,13 +23,13 @@
 )]
 #![warn(clippy::pedantic, clippy::nursery, clippy::cargo)]
 
-use clap::{CommandFactory, Parser, Subcommand};
-use thiserror::Error;
-use tokio::io::AsyncWriteExt;
 use tracing_subscriber::EnvFilter;
 
 /// Application use cases for the retail workflow.
 pub mod application;
+
+/// Runtime configuration for the retail workflow.
+pub mod config;
 
 /// Core business behavior for the retail workflow.
 pub mod domain;
@@ -37,69 +37,20 @@ pub mod domain;
 /// External adapters for the retail workflow.
 pub mod infrastructure;
 
-/// Command-line arguments for the retail replenishment workflow.
-#[derive(Debug, Parser)]
-#[command(author, version, about = "Retail replenishment workflow agent")]
-struct Cli {
-    #[command(subcommand)]
-    command: Option<Command>,
-}
-
-/// Retail workflow commands.
-#[derive(Debug, Subcommand)]
-enum Command {
-    /// Seed retail state from the configured scenario.
-    Seed,
-    /// Advance the deterministic retail simulation.
-    Simulate,
-    /// Run one restock decision cycle.
-    Decide,
-    /// Run repeated simulation and decision cycles.
-    RunCycle,
-}
-
-/// Errors returned by the runtime entrypoint.
-#[derive(Debug, Error)]
-pub enum RunError {
-    /// The command-line interface could not render help.
-    #[error("failed to render command help")]
-    RenderHelp(#[source] std::io::Error),
-}
+/// Inbound adapters for the retail workflow.
+pub mod interfaces;
 
 /// Run the retail replenishment workflow binary.
 ///
 /// # Errors
 ///
-/// Returns an error when the command interface cannot render its default help.
-pub async fn run() -> Result<(), RunError> {
+/// Returns an error when command parsing, configuration, adapter setup, or execution fails.
+pub async fn run() -> Result<(), interfaces::cli::CliError> {
     dotenvy::dotenv().ok();
 
     init_tracing();
 
-    let cli = Cli::parse();
-    match cli.command {
-        Some(Command::Seed | Command::Simulate | Command::Decide | Command::RunCycle) | None => {
-            render_default_help().await?;
-        }
-    }
-
-    Ok(())
-}
-
-async fn render_default_help() -> Result<(), RunError> {
-    let mut command = Cli::command();
-    let mut output = Vec::new();
-    command
-        .write_help(&mut output)
-        .map_err(RunError::RenderHelp)?;
-
-    let mut stdout = tokio::io::stdout();
-    stdout
-        .write_all(&output)
-        .await
-        .map_err(RunError::RenderHelp)?;
-
-    Ok(())
+    interfaces::cli::run().await
 }
 
 fn init_tracing() {

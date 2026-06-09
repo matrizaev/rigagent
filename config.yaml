@@ -1,4 +1,5 @@
 chat_model: gpt-5-nano
-embedding_model: text-embedding-3-small
-rag_db_path: data/agent.sqlite
-rag_top_k: 3
+retail_db_path: data/retail.sqlite
+retail_scenario_path: data/retail_scenario.yaml
+decision_horizon_days: 14
+max_restock_orders_per_decision: 2
