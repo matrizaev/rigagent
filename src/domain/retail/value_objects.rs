@@ -82,6 +82,22 @@ impl Display for Brand {
     }
 }
 
+impl FromStr for Brand {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for Brand {
+    type Error = DomainError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
 /// Closed set of apparel product categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ApparelKind {
@@ -422,6 +438,14 @@ impl DemandBacklog {
     }
 }
 
+impl TryFrom<u64> for DemandBacklog {
+    type Error = DomainError;
+
+    fn try_from(milli_units: u64) -> Result<Self, Self::Error> {
+        Self::from_milli_units(milli_units)
+    }
+}
+
 /// Non-zero bounded supplier lead time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LeadTimeDays(u64);
@@ -443,6 +467,14 @@ impl LeadTimeDays {
     }
 }
 
+impl TryFrom<u64> for LeadTimeDays {
+    type Error = DomainError;
+
+    fn try_from(days: u64) -> Result<Self, Self::Error> {
+        Self::new(days)
+    }
+}
+
 /// Non-zero bounded restock decision horizon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DecisionHorizonDays(u64);
@@ -461,6 +493,14 @@ impl DecisionHorizonDays {
     #[must_use]
     pub const fn days(self) -> u64 {
         self.0
+    }
+}
+
+impl TryFrom<u64> for DecisionHorizonDays {
+    type Error = DomainError;
+
+    fn try_from(days: u64) -> Result<Self, Self::Error> {
+        Self::new(days)
     }
 }
 
@@ -542,6 +582,22 @@ impl Display for SalesOrderId {
     }
 }
 
+impl FromStr for SalesOrderId {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for SalesOrderId {
+    type Error = DomainError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
 /// Identifier for a supplier restock order.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RestockOrderId(String);
@@ -569,6 +625,22 @@ impl Display for RestockOrderId {
     }
 }
 
+impl FromStr for RestockOrderId {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for RestockOrderId {
+    type Error = DomainError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
 /// Identifier for a restock decision run.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DecisionRunId(String);
@@ -593,6 +665,22 @@ impl DecisionRunId {
 impl Display for DecisionRunId {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for DecisionRunId {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for DecisionRunId {
+    type Error = DomainError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
     }
 }
 

@@ -21,6 +21,7 @@ use crate::domain::retail::{
     RestockOrderId, RestockOrderStatus, SalesOrder, SalesOrderDetails, SalesOrderId,
     SimulationDate, SizeLabel, Sku, SpaceUnits, StockQuantity,
 };
+use crate::infrastructure::scenario::{ScenarioError, ScenarioYamlLoader};
 
 use schema::{decision_runs, inventory, products, restock_orders, sales_orders, shop_state};
 
@@ -121,6 +122,15 @@ impl From<InfrastructureError> for ApplicationError {
     }
 }
 
+impl From<ScenarioError> for ApplicationError {
+    fn from(error: ScenarioError) -> Self {
+        Self::StoreFailure {
+            operation: "load scenario",
+            message: error.to_string(),
+        }
+    }
+}
+
 /// Seed state accepted by the Diesel persistence adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeedRetailState {
@@ -181,31 +191,29 @@ impl DieselRetailStore {
         reset: bool,
     ) -> Result<(), InfrastructureError> {
         let mut connection = self.connection()?;
-        connection
-            .transaction::<_, diesel::result::Error, _>(|connection| {
-                if reset {
-                    clear_state(connection)?;
-                }
+        connection.transaction::<_, InfrastructureError, _>(|connection| {
+            if reset {
+                clear_state(connection)?;
+            }
 
-                diesel::insert_into(shop_state::table)
-                    .values(ShopStateInsert::from_state(state)?)
+            diesel::insert_into(shop_state::table)
+                .values(ShopStateInsert::try_from(state)?)
+                .execute(connection)?;
+
+            for product in &state.products {
+                diesel::insert_into(products::table)
+                    .values(ProductInsert::try_from(product)?)
                     .execute(connection)?;
+            }
 
-                for product in &state.products {
-                    diesel::insert_into(products::table)
-                        .values(ProductInsert::from_product(product)?)
-                        .execute(connection)?;
-                }
+            for position in &state.inventory {
+                diesel::insert_into(inventory::table)
+                    .values(InventoryInsert::try_from(position)?)
+                    .execute(connection)?;
+            }
 
-                for position in &state.inventory {
-                    diesel::insert_into(inventory::table)
-                        .values(InventoryInsert::from_position(position)?)
-                        .execute(connection)?;
-                }
-
-                Ok(())
-            })
-            .map_err(|error| InfrastructureError::diesel("seed state", error))
+            Ok(())
+        })
     }
 
     fn connection(&self) -> Result<SqlitePooledConnection, InfrastructureError> {
@@ -351,15 +359,10 @@ impl RetailStore for DieselRetailStore {
         })
     }
 
-    fn seed_scenario(
-        &mut self,
-        _scenario_path: &Path,
-        _reset: bool,
-    ) -> Result<(), ApplicationError> {
-        Err(ApplicationError::StoreFailure {
-            operation: "seed scenario",
-            message: "scenario YAML loading is implemented in phase 5".to_owned(),
-        })
+    fn seed_scenario(&mut self, scenario_path: &Path, reset: bool) -> Result<(), ApplicationError> {
+        let state = ScenarioYamlLoader::load(scenario_path)?;
+        self.seed_state(&state, reset)?;
+        Ok(())
     }
 
     fn receive_due_restocks(
@@ -367,8 +370,8 @@ impl RetailStore for DieselRetailStore {
         on_date: SimulationDate,
     ) -> Result<Vec<RestockOrder>, ApplicationError> {
         let mut connection = self.connection()?;
-        connection
-            .transaction::<_, InfrastructureError, _>(|connection| {
+        Ok(
+            connection.transaction::<_, InfrastructureError, _>(|connection| {
                 let due_rows = restock_orders::table
                     .filter(restock_orders::status.eq("open"))
                     .filter(restock_orders::eta_date.le(date_to_string(on_date)))
@@ -414,8 +417,8 @@ impl RetailStore for DieselRetailStore {
                 }
 
                 Ok(received)
-            })
-            .map_err(ApplicationError::from)
+            })?,
+        )
     }
 
     fn record_sales_day(
@@ -424,11 +427,11 @@ impl RetailStore for DieselRetailStore {
         updated_inventory: Vec<InventoryPosition>,
     ) -> Result<(), ApplicationError> {
         let mut connection = self.connection()?;
-        connection
-            .transaction::<_, InfrastructureError, _>(|connection| {
+        Ok(
+            connection.transaction::<_, InfrastructureError, _>(|connection| {
                 for sale in &sales_orders {
                     diesel::insert_into(sales_orders::table)
-                        .values(SalesOrderInsert::from_sale(sale)?)
+                        .values(SalesOrderInsert::try_from(sale)?)
                         .execute(connection)
                         .map_err(|error| {
                             InfrastructureError::diesel("insert sales order", error)
@@ -454,25 +457,25 @@ impl RetailStore for DieselRetailStore {
                     })?;
                 }
                 Ok(())
-            })
-            .map_err(ApplicationError::from)
+            })?,
+        )
     }
 
     fn place_restock_orders(&mut self, orders: Vec<RestockOrder>) -> Result<(), ApplicationError> {
         let mut connection = self.connection()?;
-        connection
-            .transaction::<_, InfrastructureError, _>(|connection| {
+        Ok(
+            connection.transaction::<_, InfrastructureError, _>(|connection| {
                 for order in &orders {
                     diesel::insert_into(restock_orders::table)
-                        .values(RestockOrderInsert::from_order(order)?)
+                        .values(RestockOrderInsert::try_from(order)?)
                         .execute(connection)
                         .map_err(|error| {
                             InfrastructureError::diesel("insert restock order", error)
                         })?;
                 }
                 Ok(())
-            })
-            .map_err(ApplicationError::from)
+            })?,
+        )
     }
 
     fn open_restock_orders(&self) -> Result<Vec<RestockOrder>, ApplicationError> {
@@ -507,7 +510,7 @@ impl DecisionRunStore for DieselDecisionRunStore {
     fn start_decision_run(&mut self, run: DecisionRun) -> Result<(), ApplicationError> {
         let mut connection = self.connection()?;
         diesel::insert_into(decision_runs::table)
-            .values(DecisionRunInsert::from_run(&run)?)
+            .values(DecisionRunInsert::try_from(&run)?)
             .execute(&mut connection)
             .map_err(|error| InfrastructureError::diesel("start decision run", error))?;
         Ok(())
@@ -592,13 +595,17 @@ struct ShopStateInsert {
     capacity_space_units: i64,
 }
 
-impl ShopStateInsert {
-    fn from_state(state: &SeedRetailState) -> Result<Self, diesel::result::Error> {
+impl TryFrom<&SeedRetailState> for ShopStateInsert {
+    type Error = InfrastructureError;
+
+    fn try_from(state: &SeedRetailState) -> Result<Self, Self::Error> {
         Ok(Self {
             id: 1,
             current_date: date_to_string(state.current_date),
-            capacity_space_units: i64::try_from(state.capacity.units())
-                .map_err(|_| diesel::result::Error::RollbackTransaction)?,
+            capacity_space_units: i64_from_u64(
+                state.capacity.units(),
+                "shop_state.capacity_space_units",
+            )?,
         })
     }
 }
@@ -637,27 +644,37 @@ struct ProductInsert {
     active: bool,
 }
 
-impl ProductInsert {
-    fn from_product(product: &Product) -> Result<Self, diesel::result::Error> {
+impl TryFrom<&Product> for ProductInsert {
+    type Error = InfrastructureError;
+
+    fn try_from(product: &Product) -> Result<Self, Self::Error> {
         Ok(Self {
             sku: product.sku().as_str().to_owned(),
             item_type: apparel_kind_to_string(product.kind()),
             brand: product.brand().as_str().to_owned(),
             size: size_to_string(product.size()),
-            unit_cost_cents: i64::try_from(product.unit_cost().cents())
-                .map_err(|_| diesel::result::Error::RollbackTransaction)?,
-            unit_price_cents: i64::try_from(product.unit_price().cents())
-                .map_err(|_| diesel::result::Error::RollbackTransaction)?,
-            space_units: i64::try_from(product.unit_space().units())
-                .map_err(|_| diesel::result::Error::RollbackTransaction)?,
-            daily_demand_milli_units: i64::try_from(product.demand_rate().milli_units())
-                .map_err(|_| diesel::result::Error::RollbackTransaction)?,
-            restock_lead_time_days: i64::try_from(product.lead_time().days())
-                .map_err(|_| diesel::result::Error::RollbackTransaction)?,
-            min_order_quantity: i64::try_from(product.min_order_quantity().units())
-                .map_err(|_| diesel::result::Error::RollbackTransaction)?,
-            max_order_quantity: i64::try_from(product.max_order_quantity().units())
-                .map_err(|_| diesel::result::Error::RollbackTransaction)?,
+            unit_cost_cents: i64_from_u64(product.unit_cost().cents(), "products.unit_cost_cents")?,
+            unit_price_cents: i64_from_u64(
+                product.unit_price().cents(),
+                "products.unit_price_cents",
+            )?,
+            space_units: i64_from_u64(product.unit_space().units(), "products.space_units")?,
+            daily_demand_milli_units: i64_from_u64(
+                product.demand_rate().milli_units(),
+                "products.daily_demand_milli_units",
+            )?,
+            restock_lead_time_days: i64_from_u64(
+                product.lead_time().days(),
+                "products.restock_lead_time_days",
+            )?,
+            min_order_quantity: i64_from_u64(
+                product.min_order_quantity().units(),
+                "products.min_order_quantity",
+            )?,
+            max_order_quantity: i64_from_u64(
+                product.max_order_quantity().units(),
+                "products.max_order_quantity",
+            )?,
             active: product.is_active(),
         })
     }
@@ -720,14 +737,17 @@ struct InventoryInsert {
     demand_backlog_milli_units: i64,
 }
 
-impl InventoryInsert {
-    fn from_position(position: &InventoryPosition) -> Result<Self, diesel::result::Error> {
+impl TryFrom<&InventoryPosition> for InventoryInsert {
+    type Error = InfrastructureError;
+
+    fn try_from(position: &InventoryPosition) -> Result<Self, Self::Error> {
         Ok(Self {
             sku: position.sku().as_str().to_owned(),
-            on_hand: i64::try_from(position.on_hand().units())
-                .map_err(|_| diesel::result::Error::RollbackTransaction)?,
-            demand_backlog_milli_units: i64::try_from(position.demand_backlog().milli_units())
-                .map_err(|_| diesel::result::Error::RollbackTransaction)?,
+            on_hand: i64_from_u64(position.on_hand().units(), "inventory.on_hand")?,
+            demand_backlog_milli_units: i64_from_u64(
+                position.demand_backlog().milli_units(),
+                "inventory.demand_backlog_milli_units",
+            )?,
         })
     }
 }
@@ -774,8 +794,10 @@ struct RestockOrderInsert {
     rationale: String,
 }
 
-impl RestockOrderInsert {
-    fn from_order(order: &RestockOrder) -> Result<Self, InfrastructureError> {
+impl TryFrom<&RestockOrder> for RestockOrderInsert {
+    type Error = InfrastructureError;
+
+    fn try_from(order: &RestockOrder) -> Result<Self, Self::Error> {
         Ok(Self {
             id: order.id().as_str().to_owned(),
             sku: order.sku().as_str().to_owned(),
@@ -843,8 +865,10 @@ struct SalesOrderInsert {
     lost_units: i64,
 }
 
-impl SalesOrderInsert {
-    fn from_sale(sale: &SalesOrder) -> Result<Self, InfrastructureError> {
+impl TryFrom<&SalesOrder> for SalesOrderInsert {
+    type Error = InfrastructureError;
+
+    fn try_from(sale: &SalesOrder) -> Result<Self, Self::Error> {
         Ok(Self {
             id: sale.id().as_str().to_owned(),
             sale_date: date_to_string(sale.sale_date()),
@@ -886,8 +910,10 @@ struct DecisionRunInsert {
     created_restock_count: i64,
 }
 
-impl DecisionRunInsert {
-    fn from_run(run: &DecisionRun) -> Result<Self, InfrastructureError> {
+impl TryFrom<&DecisionRun> for DecisionRunInsert {
+    type Error = InfrastructureError;
+
+    fn try_from(run: &DecisionRun) -> Result<Self, Self::Error> {
         Ok(Self {
             id: run.id().as_str().to_owned(),
             decision_date: date_to_string(run.decision_date()),
@@ -1264,6 +1290,20 @@ mod tests {
         assert_eq!(snapshot.products.len(), 1);
         assert_eq!(snapshot.inventory.len(), 1);
         assert_eq!(snapshot.current_date, test_date()?);
+        Ok(())
+    }
+
+    #[test]
+    fn seeds_scenario_yaml_through_store_port() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut store, _) = stores()?;
+        let path = std::env::current_dir()?.join("data/retail_scenario.yaml");
+
+        store.seed_scenario(&path, true)?;
+        let snapshot = store.load_snapshot()?;
+
+        assert_eq!(snapshot.current_date, parse_date("2026-06-09", "test")?);
+        assert_eq!(snapshot.products.len(), 4);
+        assert_eq!(snapshot.inventory.len(), 4);
         Ok(())
     }
 

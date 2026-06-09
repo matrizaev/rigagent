@@ -41,6 +41,8 @@ Make invalid states unrepresentable where practical:
 - Use `NonZero*`, bounded constructors, and `TryFrom` for validated numeric values.
 - Prefer typed request/command/query structs at boundaries over long parameter lists.
 - Prefer `From`, `TryFrom`, `FromStr`, and `Display` for canonical conversions.
+- Do not create ad hoc conversion helpers such as `to_domain`, `to_product`, `into_seed_state`, `try_into_seed_state`, `from_row`, or `as_model` when the conversion is exactly a `From`, `TryFrom`, `FromStr`, or `Display` implementation. For fallible DTO/row/reference conversions, implement `TryFrom<Dto>`, `TryFrom<&Dto>`, `TryFrom<Row>`, or `TryFrom<&Row>` as appropriate; callers should be able to use `.into()`, `.try_into()`, or `Type::try_from(...)`.
+- Keep conversion implementations near the type or adapter that owns the boundary. Infrastructure DTOs and Diesel rows should convert into domain/application types through standard traits, not through Java-style `to_*` methods or private helper APIs that hide the conversion contract.
 - Use private fields plus intention-revealing methods for mutation. Do not expose setters that bypass invariants.
 - Keep DTOs, Diesel models, CLI structs, and provider payloads out of domain APIs. Map them at the layer boundary.
 
@@ -98,7 +100,7 @@ Use `thiserror` for crate-owned error enums. Keep errors close to the layer that
 - Infrastructure errors preserve external failure detail from databases, HTTP, IO, serialization, or provider SDKs.
 - Interface errors translate application failures into CLI exit codes, HTTP responses, worker retries, or user-facing messages.
 
-Return `Result<T, LayerError>` from fallible functions. Do not collapse internal failures into `String` until crossing an external boundary. Use `?` for straight propagation, `map_err` when adding semantic context, and `tracing` spans/events for observability rather than burying diagnostics in error strings.
+Return `Result<T, LayerError>` from fallible functions. Do not collapse internal failures into `String` until crossing an external boundary. Use `?` for straight propagation through `From`/`#[from]` conversions, and implement `From<SourceError> for LayerError` whenever a source error can be wrapped without extra runtime context. Avoid routine `map_err` closures; they are a signal that an error conversion is missing. Use `map_err` only when the target variant must include contextual data that is unavailable to a `From` implementation, such as a field path, operation name, file path, SKU, migration version, or provider name. Prefer a small named helper over repeated inline `map_err` closures when that contextual mapping recurs. Use `tracing` spans/events for observability rather than burying diagnostics in error strings.
 
 Preserve error information. When wrapping an external failure, keep the source error with `#[source]` or `#[from]`, and include typed context such as IDs, paths, provider names, migration versions, or operation names. Avoid `Box<dyn Error>`, `anyhow::Error`, or stringly typed errors in domain, application, and infrastructure code. `anyhow` is acceptable only at the binary edge for final process-level reporting during early bootstrapping.
 

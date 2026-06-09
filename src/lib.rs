@@ -72,9 +72,7 @@ pub enum RunError {
 ///
 /// Returns an error when the command interface cannot render its default help.
 pub async fn run() -> Result<(), RunError> {
-    match dotenvy::dotenv() {
-        Ok(_) | Err(_) => {}
-    }
+    dotenvy::dotenv().ok();
 
     init_tracing();
 
@@ -106,8 +104,8 @@ async fn render_default_help() -> Result<(), RunError> {
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
-
-    match tracing_subscriber::fmt().with_env_filter(filter).try_init() {
-        Ok(()) | Err(_) => {}
-    }
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .try_init()
+        .ok();
 }
