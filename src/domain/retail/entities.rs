@@ -150,6 +150,18 @@ impl Product {
         self.lead_time
     }
 
+    /// Return minimum restock order quantity.
+    #[must_use]
+    pub const fn min_order_quantity(&self) -> StockQuantity {
+        self.min_order_quantity
+    }
+
+    /// Return maximum restock order quantity.
+    #[must_use]
+    pub const fn max_order_quantity(&self) -> StockQuantity {
+        self.max_order_quantity
+    }
+
     /// Return whether the product is active.
     #[must_use]
     pub const fn is_active(&self) -> bool {
@@ -532,6 +544,36 @@ impl SalesOrder {
         })
     }
 
+    /// Return sales order identifier.
+    #[must_use]
+    pub const fn id(&self) -> &SalesOrderId {
+        &self.id
+    }
+
+    /// Return sale date.
+    #[must_use]
+    pub const fn sale_date(&self) -> SimulationDate {
+        self.sale_date
+    }
+
+    /// Return sales SKU.
+    #[must_use]
+    pub const fn sku(&self) -> &Sku {
+        &self.sku
+    }
+
+    /// Return requested units.
+    #[must_use]
+    pub const fn requested(&self) -> StockQuantity {
+        self.requested
+    }
+
+    /// Return fulfilled units.
+    #[must_use]
+    pub const fn fulfilled(&self) -> StockQuantity {
+        self.fulfilled
+    }
+
     /// Return revenue.
     #[must_use]
     pub const fn revenue(&self) -> MoneyCents {
@@ -607,10 +649,40 @@ impl DecisionRun {
         }
     }
 
+    /// Return decision run identifier.
+    #[must_use]
+    pub const fn id(&self) -> &DecisionRunId {
+        &self.id
+    }
+
+    /// Return decision date.
+    #[must_use]
+    pub const fn decision_date(&self) -> SimulationDate {
+        self.decision_date
+    }
+
+    /// Return decision horizon.
+    #[must_use]
+    pub const fn horizon(&self) -> DecisionHorizonDays {
+        self.horizon
+    }
+
     /// Return current decision status.
     #[must_use]
     pub const fn status(&self) -> DecisionRunStatus {
         self.status
+    }
+
+    /// Return decision summary.
+    #[must_use]
+    pub fn summary(&self) -> Option<&str> {
+        self.summary.as_deref()
+    }
+
+    /// Return created restock count.
+    #[must_use]
+    pub const fn created_restock_count(&self) -> StockQuantity {
+        self.created_restock_count
     }
 
     /// Complete the decision run.

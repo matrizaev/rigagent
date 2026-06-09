@@ -28,8 +28,14 @@ use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tracing_subscriber::EnvFilter;
 
+/// Application use cases for the retail workflow.
+pub mod application;
+
 /// Core business behavior for the retail workflow.
 pub mod domain;
+
+/// External adapters for the retail workflow.
+pub mod infrastructure;
 
 /// Command-line arguments for the retail replenishment workflow.
 #[derive(Debug, Parser)]
