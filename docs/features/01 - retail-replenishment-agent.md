@@ -1,7 +1,7 @@
 # Retail Replenishment Decision Agent
 
 Date: 2026-06-09
-Status: Draft
+Status: Accepted
 
 ## Summary
 

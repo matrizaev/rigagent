@@ -1,61 +1,104 @@
-mod config;
-mod rag;
-mod repl;
+//! Retail replenishment workflow runtime.
 
-pub mod knowledge;
-pub mod tools;
+#![forbid(unsafe_code)]
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::dbg_macro,
+    clippy::print_stdout,
+    clippy::print_stderr,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::float_arithmetic,
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    missing_docs
+)]
+#![warn(clippy::pedantic, clippy::nursery, clippy::cargo)]
 
-use anyhow::Context;
-use clap::Parser;
-use rig::client::{CompletionClient, EmbeddingsClient};
-use rig::providers::openai;
-use tracing::info;
+use clap::{CommandFactory, Parser, Subcommand};
+use thiserror::Error;
+use tokio::io::AsyncWriteExt;
 use tracing_subscriber::EnvFilter;
 
-use config::AppConfig;
-
+/// Command-line arguments for the retail replenishment workflow.
 #[derive(Debug, Parser)]
-#[command(author, version, about = "Interactive Rig support agent demo")]
+#[command(author, version, about = "Retail replenishment workflow agent")]
 struct Cli {
-    /// Rebuild the SQLite vector database from data/knowledge_base.json.
-    #[arg(long)]
-    reindex: bool,
+    #[command(subcommand)]
+    command: Option<Command>,
 }
 
-pub async fn run() -> anyhow::Result<()> {
-    let _ = dotenvy::dotenv();
+/// Retail workflow commands.
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Seed retail state from the configured scenario.
+    Seed,
+    /// Advance the deterministic retail simulation.
+    Simulate,
+    /// Run one restock decision cycle.
+    Decide,
+    /// Run repeated simulation and decision cycles.
+    RunCycle,
+}
+
+/// Errors returned by the runtime entrypoint.
+#[derive(Debug, Error)]
+pub enum RunError {
+    /// The command-line interface could not render help.
+    #[error("failed to render command help")]
+    RenderHelp(#[source] std::io::Error),
+}
+
+/// Run the retail replenishment workflow binary.
+///
+/// # Errors
+///
+/// Returns an error when the command interface cannot render its default help.
+pub async fn run() -> Result<(), RunError> {
+    match dotenvy::dotenv() {
+        Ok(_) | Err(_) => {}
+    }
+
     init_tracing();
 
     let cli = Cli::parse();
-    let config = AppConfig::load()?;
+    match cli.command {
+        Some(Command::Seed | Command::Simulate | Command::Decide | Command::RunCycle) | None => {
+            render_default_help().await?;
+        }
+    }
 
-    info!(
-        chat_model = %config.chat_model,
-        embedding_model = %config.embedding_model,
-        db_path = %config.rag_db_path.display(),
-        top_k = config.rag_top_k.get(),
-        "starting support agent"
-    );
+    Ok(())
+}
 
-    let openai_client = openai::Client::new(config.openai_api_key.clone())
-        .context("failed to initialize OpenAI client")?;
-    let embedding_model = openai_client.embedding_model(config.embedding_model.clone());
-    let index = rag::prepare_index(&config, embedding_model, cli.reindex).await?;
+async fn render_default_help() -> Result<(), RunError> {
+    let mut command = Cli::command();
+    let mut output = Vec::new();
+    command
+        .write_help(&mut output)
+        .map_err(RunError::RenderHelp)?;
 
-    let agent = openai_client
-        .agent(config.chat_model.clone())
-        .preamble(repl::AGENT_PREAMBLE)
-        .dynamic_context(config.rag_top_k.get(), index)
-        .tool(tools::LookupOrderStatus)
-        .tool(tools::ListOrders)
-        .build();
-
-    repl::run(agent).await?;
+    let mut stdout = tokio::io::stdout();
+    stdout
+        .write_all(&output)
+        .await
+        .map_err(RunError::RenderHelp)?;
 
     Ok(())
 }
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+
+    match tracing_subscriber::fmt().with_env_filter(filter).try_init() {
+        Ok(()) | Err(_) => {}
+    }
 }
