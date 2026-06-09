@@ -28,6 +28,9 @@ use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tracing_subscriber::EnvFilter;
 
+/// Core business behavior for the retail workflow.
+pub mod domain;
+
 /// Command-line arguments for the retail replenishment workflow.
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Retail replenishment workflow agent")]
