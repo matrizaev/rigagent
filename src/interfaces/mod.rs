@@ -1,3 +1,4 @@
-//! Inbound adapters for command-line and future transport boundaries.
+//! Inbound adapters for the retail workflow.
 
+/// Command-line interface adapter.
 pub mod cli;

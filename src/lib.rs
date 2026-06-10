@@ -21,7 +21,7 @@
     clippy::missing_panics_doc,
     missing_docs
 )]
-#![warn(clippy::pedantic, clippy::nursery)]
+#![warn(clippy::pedantic, clippy::nursery, clippy::cargo)]
 
 use tracing_subscriber::EnvFilter;
 

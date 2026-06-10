@@ -1,4 +1,4 @@
-//! Binary entrypoint for the retail replenishment workflow tutorial.
+//! Binary entrypoint for the retail replenishment workflow.
 
 #![forbid(unsafe_code)]
 #![deny(
@@ -21,7 +21,7 @@
     clippy::missing_panics_doc,
     missing_docs
 )]
-#![warn(clippy::pedantic, clippy::nursery)]
+#![warn(clippy::pedantic, clippy::nursery, clippy::cargo)]
 
 use std::process::ExitCode;
 
@@ -33,10 +33,7 @@ async fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             let mut stderr = tokio::io::stderr();
-            let message = format!("{error}\n");
-            if stderr.write_all(message.as_bytes()).await.is_err() {
-                return ExitCode::FAILURE;
-            }
+            stderr.write_all(format!("{error}\n").as_bytes()).await.ok();
             error.exit_code()
         }
     }

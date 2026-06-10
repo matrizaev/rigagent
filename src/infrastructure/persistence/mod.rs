@@ -25,6 +25,7 @@ use crate::domain::retail::{
     SimulationDate, SizeLabel, Sku, SpaceUnits, StockQuantity,
 };
 use crate::infrastructure::scenario::{ScenarioError, ScenarioYamlLoader};
+
 use schema::{decision_runs, inventory, products, restock_orders, sales_orders, shop_state};
 
 /// Embedded Diesel migrations for retail persistence.
