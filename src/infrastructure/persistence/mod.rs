@@ -4,6 +4,7 @@ mod schema;
 
 use std::error::Error as StdError;
 use std::fmt::{self, Display, Formatter};
+use std::path::Path;
 use std::sync::Arc;
 
 use chrono::NaiveDate;
@@ -23,6 +24,7 @@ use crate::domain::retail::{
     RestockOrderId, RestockOrderStatus, SalesOrder, SalesOrderDetails, SalesOrderId,
     SimulationDate, SizeLabel, Sku, SpaceUnits, StockQuantity,
 };
+use crate::infrastructure::scenario::{ScenarioError, ScenarioYamlLoader};
 use schema::{decision_runs, inventory, products, restock_orders, sales_orders, shop_state};
 
 /// Embedded Diesel migrations for retail persistence.
@@ -176,6 +178,15 @@ impl From<InfrastructureError> for ApplicationError {
     fn from(error: InfrastructureError) -> Self {
         Self::StoreFailure {
             operation: "diesel persistence",
+            source: SharedError::new(error),
+        }
+    }
+}
+
+impl From<ScenarioError> for ApplicationError {
+    fn from(error: ScenarioError) -> Self {
+        Self::StoreFailure {
+            operation: "load scenario",
             source: SharedError::new(error),
         }
     }
@@ -387,15 +398,10 @@ impl RetailStore for DieselRetailStore {
         })
     }
 
-    fn seed_scenario(
-        &mut self,
-        _scenario_path: &std::path::Path,
-        _reset: bool,
-    ) -> Result<(), ApplicationError> {
-        Err(ApplicationError::store_failure(
-            "seed scenario",
-            "scenario YAML loading is added in tutorial/05-scenario-seeding",
-        ))
+    fn seed_scenario(&mut self, scenario_path: &Path, reset: bool) -> Result<(), ApplicationError> {
+        let state = ScenarioYamlLoader::load(scenario_path)?;
+        self.seed_state(&state, reset)?;
+        Ok(())
     }
 
     fn receive_due_restocks(
@@ -1289,20 +1295,16 @@ mod tests {
     }
 
     #[test]
-    fn seed_scenario_is_deferred_to_next_tutorial_branch() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn seeds_scenario_yaml_through_store_port() -> Result<(), Box<dyn std::error::Error>> {
         let (mut store, _) = stores()?;
-        let path = std::path::Path::new("data/retail_scenario.yaml");
+        let path = std::env::current_dir()?.join("data/retail_scenario.yaml");
 
-        let result = store.seed_scenario(path, true);
+        store.seed_scenario(&path, true)?;
+        let snapshot = store.load_snapshot()?;
 
-        assert!(matches!(
-            result,
-            Err(ApplicationError::StoreFailure {
-                operation: "seed scenario",
-                ..
-            })
-        ));
+        assert_eq!(snapshot.current_date, parse_date("2026-06-09", "test")?);
+        assert_eq!(snapshot.products.len(), 4);
+        assert_eq!(snapshot.inventory.len(), 4);
         Ok(())
     }
 

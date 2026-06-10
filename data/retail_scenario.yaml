@@ -1,0 +1,53 @@
+shop:
+  start_date: "2026-06-09"
+  capacity_space_units: 240
+
+products:
+  - sku: "TSH-ACME-M-BLK"
+    item_type: "shirt"
+    brand: "Acme"
+    size: "M"
+    unit_cost_cents: 1200
+    unit_price_cents: 2999
+    space_units: 2
+    initial_on_hand: 18
+    daily_demand_rate: "2.750"
+    restock_lead_time_days: 4
+    min_order_quantity: 6
+    max_order_quantity: 36
+  - sku: "JKT-NOVA-L-GRN"
+    item_type: "jacket"
+    brand: "Nova"
+    size: "L"
+    unit_cost_cents: 4200
+    unit_price_cents: 8999
+    space_units: 5
+    initial_on_hand: 8
+    daily_demand_rate: "0.900"
+    restock_lead_time_days: 7
+    min_order_quantity: 3
+    max_order_quantity: 18
+  - sku: "SHO-URBN-9-WHT"
+    item_type: "shoes"
+    brand: "Urban"
+    size: "9"
+    unit_cost_cents: 3500
+    unit_price_cents: 7499
+    space_units: 4
+    initial_on_hand: 10
+    daily_demand_rate: "1.200"
+    restock_lead_time_days: 6
+    min_order_quantity: 4
+    max_order_quantity: 24
+  - sku: "ACC-LUMA-OS-BLU"
+    item_type: "accessory"
+    brand: "Luma"
+    size: "M"
+    unit_cost_cents: 500
+    unit_price_cents: 1499
+    space_units: 1
+    initial_on_hand: 30
+    daily_demand_rate: "3.125"
+    restock_lead_time_days: 3
+    min_order_quantity: 10
+    max_order_quantity: 50

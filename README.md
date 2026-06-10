@@ -1,24 +1,24 @@
-# rigagent tutorial: 04 Diesel persistence
+# rigagent tutorial: 05 scenario seeding
 
-This branch is the fifth checkpoint in the `rigagent` build-along tutorial. It
-starts from `tutorial/03-application-layer` and adds Diesel-backed SQLite
-persistence behind the application ports.
+This branch is the sixth checkpoint in the `rigagent` build-along tutorial. It
+starts from `tutorial/04-diesel-persistence` and adds deterministic YAML seed
+data plus an infrastructure scenario loader. `DieselRetailStore::seed_scenario`
+now loads YAML, converts DTOs into validated domain objects, and seeds SQLite
+through the persistence adapter.
 
-The command-line runtime still has placeholder command dispatch. Scenario YAML
-loading, the Rig decision agent, and CLI-to-use-case wiring are still later
-checkpoints.
+The command-line runtime still has placeholder command dispatch. The Rig
+decision agent and CLI-to-use-case wiring are still later checkpoints.
 
 ## Current State
 
-The repository now has infrastructure persistence:
+The repository now includes scenario seeding:
 
 ```text
 rigagent/
 +-- config.yaml
++-- data/
+|   +-- retail_scenario.yaml
 +-- migrations/
-|   +-- 2026-06-09-000001_create_retail_state/
-|       +-- up.sql
-|       +-- down.sql
 +-- src/
     +-- domain/
     |   +-- retail/
@@ -27,8 +27,8 @@ rigagent/
     +-- infrastructure/
     |   +-- mod.rs
     |   +-- persistence/
+    |   +-- scenario/
     |       +-- mod.rs
-    |       +-- schema.rs
     +-- interfaces/
         +-- cli.rs
 ```
@@ -36,110 +36,77 @@ rigagent/
 Dependency direction:
 
 ```text
+infrastructure::scenario -> infrastructure::persistence::SeedRetailState
+infrastructure::scenario -> domain
 infrastructure::persistence -> application -> domain
 ```
 
-Diesel schema, row structs, insert structs, migrations, pools, and adapter error
-mapping stay inside `src/infrastructure/persistence/`. Domain and application
-APIs do not expose Diesel types.
+The scenario module owns YAML DTOs, file IO, and external seed-data shape.
+Domain and application APIs still do not expose YAML DTOs or Diesel rows.
 
 ## What This Branch Adds
 
-### Migrations
+### Seed Data
 
-`migrations/2026-06-09-000001_create_retail_state/up.sql` creates:
+`data/retail_scenario.yaml` defines:
 
-- `shop_state`
-- `products`
-- `inventory`
-- `decision_runs`
-- `sales_orders`
-- `restock_orders`
+- shop start date.
+- stock-space capacity.
+- product catalog.
+- initial inventory.
+- demand rates.
+- restock lead times.
+- min and max order quantities.
 
-The schema includes constraints that mirror important domain invariants:
+The bundled scenario includes four apparel products with different economics
+and space constraints so later simulation and restock scoring have useful input.
 
-- single-row shop state.
-- non-negative money, stock, space, and demand values.
-- positive lead times and order minimums.
-- max order quantity greater than or equal to min order quantity.
-- demand backlog below one fixed-point unit.
-- known restock and decision-run statuses.
-- fulfilled sales not exceeding requested sales.
-- product and decision-run foreign keys.
+Demand rates are quoted fixed-point decimal strings:
 
-`down.sql` drops those tables and indexes in reverse dependency order.
-
-### Diesel Schema
-
-`src/infrastructure/persistence/schema.rs` contains private Diesel `table!`
-declarations and relationships. It is an infrastructure detail.
-
-### Infrastructure Errors
-
-`InfrastructureError` maps persistence failures into structured variants:
-
-- not found.
-- unique violation.
-- foreign-key violation.
-- migration failure.
-- connection pool failure.
-- serialization failure.
-- invalid persisted data.
-
-The adapter maps these into `ApplicationError` at the application boundary while
-preserving source details.
-
-### Pool And Migrations
-
-The persistence module adds:
-
-- `create_pool(database_url)`
-- `run_migrations(pool)`
-
-The pool is an r2d2-backed SQLite pool. Connections enable SQLite foreign-key
-checks before use.
-
-### Store Adapters
-
-The branch adds:
-
-- `DieselRetailStore`
-- `DieselDecisionRunStore`
-
-Implemented application ports:
-
-- `RetailStore`
-- `DecisionRunStore`
-
-Supported behavior:
-
-- state existence checks.
-- snapshot loading.
-- direct domain-state seeding through `seed_state`.
-- due restock receipt.
-- sales-day recording.
-- restock order placement.
-- open restock order queries.
-- profit summary calculation.
-- logical shop date advancement.
-- decision-run start, complete, fail, and load.
-
-Multi-write operations run in Diesel transactions.
-
-### Seed Scenario Placeholder
-
-`RetailStore::seed_scenario` is intentionally still a placeholder in this branch:
-
-```text
-scenario YAML loading is added in tutorial/05-scenario-seeding
+```yaml
+daily_demand_rate: "2.750"
 ```
 
-This keeps branch 04 focused on persistence mechanics. The adapter already has a
-`seed_state` method that tests can use with validated domain objects.
+They are parsed into domain milli-units. The loader does not use float
+arithmetic.
+
+### Scenario Loader
+
+`src/infrastructure/scenario/mod.rs` adds:
+
+- private YAML DTOs.
+- `ScenarioYamlLoader`.
+- `ScenarioError`.
+- checked DTO-to-domain conversion.
+
+Validation rules:
+
+- scenario file must be readable.
+- YAML must parse.
+- product list must not be empty.
+- dates must be valid.
+- numeric fields must be non-negative where appropriate.
+- SKUs are canonicalized through `Sku`.
+- duplicate SKUs are rejected after canonicalization.
+- demand rates are parsed through `DemandRatePerDay`.
+- product rows are validated through `Product::from_details`.
+- initial inventory is converted into `InventoryPosition`.
+- initial occupied space must fit within configured shop capacity.
+
+### Persistence Wiring
+
+`DieselRetailStore::seed_scenario` now:
+
+1. Loads `SeedRetailState` through `ScenarioYamlLoader`.
+2. Seeds SQLite through `seed_state`.
+3. Runs the write in a persistence transaction.
+
+Scenario failures map into `ApplicationError::StoreFailure` with source details
+preserved.
 
 ## Runtime Behavior
 
-The CLI is still not wired to infrastructure:
+The CLI is still not wired to the application layer:
 
 ```bash
 cargo run
@@ -151,14 +118,16 @@ opened, and no state is mutated.
 Real commands still return placeholder errors:
 
 ```bash
-cargo run -- simulate --days 1
+cargo run -- seed --reset
 ```
 
 Expected behavior:
 
 ```text
-simulate is parsed but not implemented until a later tutorial branch
+seed is parsed but not implemented until a later tutorial branch
 ```
+
+CLI wiring belongs to `tutorial/07-cli-workflow`.
 
 ## Validate This Branch
 
@@ -176,196 +145,171 @@ The test suite now covers:
 - runtime config and CLI shell behavior.
 - domain invariants and deterministic services.
 - application use cases with fakes.
-- migrated SQLite state seeding through domain objects.
-- shop date advancement.
-- due restock receipt and inventory updates.
-- sales-day recording and profit summary.
-- transaction rollback on duplicate sale IDs.
-- foreign-key violation mapping.
-- unique violation mapping.
-- invalid persisted product data mapping.
-- explicit deferral of YAML scenario loading to the next branch.
+- Diesel persistence against migrated SQLite databases.
+- loading valid scenario YAML.
+- duplicate SKU rejection.
+- empty product list rejection.
+- negative field rejection.
+- initial capacity validation.
+- seeding the bundled YAML through `DieselRetailStore::seed_scenario`.
 
 ## Goal For The Next Branch
 
-The next branch is `tutorial/05-scenario-seeding`. It should add deterministic
-YAML seed data and a scenario loader, then wire `DieselRetailStore::seed_scenario`
-through that loader.
+The next branch is `tutorial/06-rig-decision-agent`. It should add the
+Rig-backed implementation of the `ReplenishmentDecisionAgent` application port.
 
 When you finish the next branch, the repository should contain:
 
 ```text
-data/
-+-- retail_scenario.yaml
 src/infrastructure/
-+-- scenario/
++-- agents/
     +-- mod.rs
+    +-- rig_replenishment/
+        +-- mod.rs
 ```
 
-The CLI may still return placeholder command errors after the next branch. The
-goal is seed-data loading and validation, not runtime command dispatch.
+The CLI may still return placeholder command errors. The goal is the decision
+agent adapter, not runtime wiring.
 
-## Step By Step: Reach `tutorial/05-scenario-seeding`
+## Step By Step: Reach `tutorial/06-rig-decision-agent`
 
-### 1. Add The Scenario File
-
-Create `data/retail_scenario.yaml`:
-
-```yaml
-shop:
-  start_date: "2026-06-09"
-  capacity_space_units: 240
-
-products:
-  - sku: "TSH-ACME-M-BLK"
-    item_type: "shirt"
-    brand: "Acme"
-    size: "M"
-    unit_cost_cents: 1200
-    unit_price_cents: 2999
-    space_units: 2
-    initial_on_hand: 18
-    daily_demand_rate: "2.750"
-    restock_lead_time_days: 4
-    min_order_quantity: 6
-    max_order_quantity: 36
-```
-
-Add several products so simulation and restock scoring have meaningful variety:
-
-- a fast-moving low-space item.
-- a high-margin larger item.
-- a moderate-demand footwear item.
-- an accessory with high demand and low space cost.
-
-Keep demand rates quoted strings. They are fixed-point decimal inputs, not
-floats.
-
-### 2. Create The Scenario Module
+### 1. Create The Agent Module
 
 Create:
 
 ```text
-src/infrastructure/scenario/mod.rs
+src/infrastructure/agents/mod.rs
+src/infrastructure/agents/rig_replenishment/mod.rs
 ```
 
 Update `src/infrastructure/mod.rs`:
 
 ```rust
-pub mod scenario;
+pub mod agents;
 ```
 
-The scenario module belongs in infrastructure because it owns file IO, YAML
-DTOs, and external data shape.
+The agent adapter belongs in infrastructure because it owns provider SDK types,
+prompt shape, Rig tools, and provider failure mapping.
 
-### 3. Define YAML DTOs
+### 2. Implement The Application Port
 
-In `scenario/mod.rs`, define private DTO structs:
+In `rig_replenishment/mod.rs`, define `RigReplenishmentDecisionAgent`.
 
-- `ScenarioDocument`
-- `ShopDto`
-- `ProductDto`
-
-Use `serde::Deserialize` on DTOs only. Do not derive serde traits on domain
-types just to parse YAML.
-
-Expected YAML fields:
-
-- `shop.start_date`
-- `shop.capacity_space_units`
-- `products[].sku`
-- `products[].item_type`
-- `products[].brand`
-- `products[].size`
-- `products[].unit_cost_cents`
-- `products[].unit_price_cents`
-- `products[].space_units`
-- `products[].initial_on_hand`
-- `products[].daily_demand_rate`
-- `products[].restock_lead_time_days`
-- `products[].min_order_quantity`
-- `products[].max_order_quantity`
-
-### 4. Add Scenario Errors
-
-Define `ScenarioError` with `thiserror`.
-
-Recommended variants:
-
-- read failure with path context.
-- YAML parse failure with path context.
-- domain conversion failure.
-- duplicate SKU.
-- empty product list.
-- initial inventory exceeding capacity.
-
-Preserve IO and YAML source errors.
-
-### 5. Convert DTOs Into Domain State
-
-Add `ScenarioYamlLoader::load(path) -> Result<SeedRetailState, ScenarioError>`.
-
-Conversion rules:
-
-- Parse `shop.start_date` into `SimulationDate`.
-- Convert capacity into `SpaceUnits`.
-- Convert each product row into `Product`.
-- Convert initial inventory into `InventoryPosition`.
-- Parse `daily_demand_rate` as a fixed-point decimal string using
-  `DemandRatePerDay`.
-- Canonicalize SKUs through `Sku`.
-- Reject duplicate SKUs after canonicalization.
-- Reject empty product lists.
-- Reject capacity that cannot hold initial stock.
-
-Use domain constructors and `TryFrom`/`FromStr`. Do not bypass invariants.
-
-### 6. Wire Diesel Seeding
-
-In `src/infrastructure/persistence/mod.rs`, replace the placeholder
-`seed_scenario` method:
+It should implement:
 
 ```rust
-fn seed_scenario(&mut self, scenario_path: &Path, reset: bool) -> Result<(), ApplicationError> {
-    let state = ScenarioYamlLoader::load(scenario_path)?;
-    self.seed_state(&state, reset)?;
-    Ok(())
+ReplenishmentDecisionAgent
+```
+
+Constructor inputs:
+
+- OpenAI API key.
+- chat model name.
+
+The adapter should construct provider clients only when a decision command needs
+the agent in a later branch. `seed` and `simulate` must not require
+`OPENAI_API_KEY`.
+
+### 3. Add A Per-Decision Session
+
+Create an in-memory decision session that contains:
+
+- current `RetailSnapshot`.
+- ranked deterministic `RestockOption` values.
+- open restock orders.
+- profit summary.
+- max allowed proposals.
+- proposals collected during the model turn.
+
+Tools should operate on this session. They should not write directly to Diesel.
+
+### 4. Add Tool Surface
+
+Expose implementation-detail tools to the model:
+
+- `get_inventory_snapshot`
+- `list_open_restock_orders`
+- `analyze_restock_options`
+- `place_restock_order`
+- `get_profit_summary`
+
+Tool behavior:
+
+- Snapshot tools return concise structured summaries.
+- `analyze_restock_options` returns deterministic candidates scored by Rust.
+- `place_restock_order` records a proposed SKU, quantity, and rationale in the
+  in-memory session.
+- Tools return validation feedback, but durable validation still happens in the
+  application use case.
+
+### 5. Write The Prompt
+
+Use an autonomous workflow prompt, not a chat-support prompt.
+
+The prompt should tell the model to:
+
+- inspect inventory.
+- inspect ranked restock options.
+- inspect open inbound orders.
+- inspect profit summary.
+- place no more than the configured maximum number of restock orders.
+- include SKU, quantity, and short rationale for each proposal.
+- prefer high expected gross profit per occupied stock-space.
+- avoid duplicate inbound orders.
+- avoid capacity overflow.
+
+Do not log provider prompts or sensitive payloads.
+
+### 6. Return Application Models
+
+After the model turn, the adapter should return:
+
+```rust
+DecisionAgentResponse {
+    proposed_orders,
+    summary,
 }
 ```
 
-Map `ScenarioError` into `ApplicationError::StoreFailure` with operation
-`"load scenario"` or similarly explicit context.
+The returned proposals are not trusted durable writes. `RetailWorkflow` already
+validates them before persistence.
 
-### 7. Add Scenario Tests
+### 7. Map Provider Failures
+
+Provider and tool failures should map into `ApplicationError::AgentFailure`.
+
+Preserve the source error when available. Avoid collapsing failures into plain
+strings except at the outermost display boundary.
+
+### 8. Add Adapter Tests Without Network
+
+Normal tests must not call OpenAI.
 
 Good tests:
 
-- loads the bundled scenario file.
-- rejects duplicate SKUs after canonicalization.
-- rejects empty product lists.
-- rejects invalid dates.
-- rejects invalid demand decimal strings.
-- rejects initial stock that exceeds shop capacity.
+- tool argument parsing records a proposal.
+- proposal quantity must be positive.
+- max proposal count is enforced in the session.
+- adapter failure mapping preserves an agent failure.
+- formatting of inventory/options/profit summaries is deterministic enough for
+  tests.
 
-Use temporary files for negative YAML cases.
+Use fakes or narrow seams for provider behavior. Keep real network calls out of
+`cargo test`.
 
-### 8. Add Persistence Integration For Scenario Seeding
+### 9. Keep Application Boundaries Clean
 
-Add or restore a persistence test:
+Do not put Rig types into:
 
-```text
-seeds_scenario_yaml_through_store_port
-```
+- domain APIs.
+- application commands.
+- application read models.
+- application ports.
 
-It should:
+The only public application-facing type should remain the
+`ReplenishmentDecisionAgent` port and its request/response structs.
 
-- create an isolated SQLite database.
-- run real migrations.
-- call `store.seed_scenario("data/retail_scenario.yaml", true)`.
-- load a snapshot.
-- assert the expected date, product count, and inventory count.
-
-### 9. Validate The Next Checkpoint
+### 10. Validate The Next Checkpoint
 
 Run:
 
@@ -379,10 +323,10 @@ cargo run
 Expected state at the end:
 
 - Runtime help still works with no mutation.
-- Domain, application, and persistence tests still pass.
-- Scenario loader tests pass without OpenAI or network access.
-- `DieselRetailStore::seed_scenario` works through the YAML loader.
-- Domain and application APIs still do not expose YAML DTOs or Diesel rows.
+- Domain, application, persistence, and scenario tests still pass.
+- Agent adapter tests pass without network access.
+- The Rig adapter implements `ReplenishmentDecisionAgent`.
+- Durable writes still happen only in the application/persistence path.
 
 ## Branch Ladder
 
