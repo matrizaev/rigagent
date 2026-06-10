@@ -1,185 +1,145 @@
-# rigagent tutorial: 03 application layer
+# rigagent tutorial: 04 Diesel persistence
 
-This branch is the fourth checkpoint in the `rigagent` build-along tutorial. It
-starts from `tutorial/02-domain-model` and adds the application layer around the
-retail domain: typed commands, read models, application errors, outbound ports,
-use-case orchestration, proposal validation, and deterministic fakes for tests.
+This branch is the fifth checkpoint in the `rigagent` build-along tutorial. It
+starts from `tutorial/03-application-layer` and adds Diesel-backed SQLite
+persistence behind the application ports.
 
-The command-line runtime still has placeholder command dispatch. There is no
-Diesel adapter, scenario loader, Rig agent, or CLI-to-use-case wiring yet.
+The command-line runtime still has placeholder command dispatch. Scenario YAML
+loading, the Rig decision agent, and CLI-to-use-case wiring are still later
+checkpoints.
 
 ## Current State
 
-The repository now has both the domain center and the application ring:
+The repository now has infrastructure persistence:
 
 ```text
 rigagent/
 +-- config.yaml
++-- migrations/
+|   +-- 2026-06-09-000001_create_retail_state/
+|       +-- up.sql
+|       +-- down.sql
 +-- src/
-    +-- main.rs
-    +-- lib.rs
-    +-- config.rs
     +-- domain/
     |   +-- retail/
-    |       +-- errors.rs
-    |       +-- value_objects.rs
-    |       +-- entities.rs
-    |       +-- services.rs
     +-- application/
-    |   +-- mod.rs
     |   +-- retail/
-    |       +-- mod.rs
-    |       +-- commands.rs
-    |       +-- errors.rs
-    |       +-- ports.rs
-    |       +-- read_models.rs
-    |       +-- use_cases.rs
     +-- infrastructure/
     |   +-- mod.rs
+    |   +-- persistence/
+    |       +-- mod.rs
+    |       +-- schema.rs
     +-- interfaces/
-        +-- mod.rs
         +-- cli.rs
 ```
 
 Dependency direction:
 
 ```text
-application -> domain
-interfaces -> runtime shell
+infrastructure::persistence -> application -> domain
 ```
 
-The application layer does not import Diesel, Rig, Clap, config loader internals,
-YAML DTOs, provider payloads, or infrastructure modules. It defines ports for
-those side effects instead.
+Diesel schema, row structs, insert structs, migrations, pools, and adapter error
+mapping stay inside `src/infrastructure/persistence/`. Domain and application
+APIs do not expose Diesel types.
 
 ## What This Branch Adds
 
-### Commands
+### Migrations
 
-`src/application/retail/commands.rs` defines typed use-case inputs:
+`migrations/2026-06-09-000001_create_retail_state/up.sql` creates:
 
-- `SeedRetailScenario`
-- `AdvanceSimulation`
-- `RunRestockDecision`
-- `RunWorkflowCycle`
+- `shop_state`
+- `products`
+- `inventory`
+- `decision_runs`
+- `sales_orders`
+- `restock_orders`
 
-These are application commands, not CLI parser structs. The CLI will map into
-them in a later branch.
+The schema includes constraints that mirror important domain invariants:
 
-### Read Models
+- single-row shop state.
+- non-negative money, stock, space, and demand values.
+- positive lead times and order minimums.
+- max order quantity greater than or equal to min order quantity.
+- demand backlog below one fixed-point unit.
+- known restock and decision-run statuses.
+- fulfilled sales not exceeding requested sales.
+- product and decision-run foreign keys.
 
-`src/application/retail/read_models.rs` defines stable outputs:
+`down.sql` drops those tables and indexes in reverse dependency order.
 
-- `RetailSnapshot`
-- `ProfitSummary`
-- `AdvanceSimulationResult`
-- `DecisionResult`
-- `WorkflowCycleResult`
-- `EventCount`
-- accepted restock order models.
-- rejected restock proposal models.
+### Diesel Schema
 
-Read models may contain domain types such as `Sku`, `Product`,
-`InventoryPosition`, `RestockOrder`, `SimulationDate`, and `MoneyCents`.
-They do not contain database rows, provider payloads, or Clap types.
+`src/infrastructure/persistence/schema.rs` contains private Diesel `table!`
+declarations and relationships. It is an infrastructure detail.
 
-### Application Errors
+### Infrastructure Errors
 
-`src/application/retail/errors.rs` defines `ApplicationError`.
+`InfrastructureError` maps persistence failures into structured variants:
 
-It covers:
+- not found.
+- unique violation.
+- foreign-key violation.
+- migration failure.
+- connection pool failure.
+- serialization failure.
+- invalid persisted data.
 
-- domain failures.
-- state already exists.
-- SKU not found.
-- inactive products.
-- missing inventory.
-- duplicate open restock orders.
-- capacity overflow proposals.
-- proposal quantities outside product bounds.
-- non-positive command fields.
-- count overflow.
-- missing decision runs.
-- port failures for stores, clocks, and the decision agent.
+The adapter maps these into `ApplicationError` at the application boundary while
+preserving source details.
 
-Port failures preserve source errors without coupling application code to
-concrete infrastructure error types.
+### Pool And Migrations
 
-### Ports
+The persistence module adds:
 
-`src/application/retail/ports.rs` defines outbound boundaries:
+- `create_pool(database_url)`
+- `run_migrations(pool)`
 
-- `RetailStore`
-- `DecisionRunStore`
-- `ReplenishmentDecisionAgent`
-- `Clock`
-- `IdGenerator`
+The pool is an r2d2-backed SQLite pool. Connections enable SQLite foreign-key
+checks before use.
 
-The ports are behavior-oriented. They do not expose generic table access or
-adapter-specific types.
+### Store Adapters
 
-### Use Cases
+The branch adds:
 
-`src/application/retail/use_cases.rs` adds `RetailWorkflow`, a generic
-application service constructed from port implementations.
+- `DieselRetailStore`
+- `DieselDecisionRunStore`
 
-Implemented use cases:
-
-- `seed_scenario`
-  - rejects existing state unless reset is requested.
-  - delegates durable seeding to the store port.
-- `get_snapshot`
-  - loads a read snapshot through the store port.
-- `advance_simulation`
-  - receives due restocks before demand.
-  - simulates deterministic demand per product.
-  - records sales and lost units.
-  - updates inventory through domain behavior.
-  - advances the logical shop date.
-- `run_restock_decision`
-  - starts a decision run.
-  - scores deterministic restock options.
-  - calls the decision-agent port.
-  - validates every proposal in application/domain code.
-  - persists accepted restock orders.
-  - completes or fails the decision run.
-- `run_workflow_cycle`
-  - decides on day zero.
-  - simulates one day at a time.
-  - decides again on each configured interval.
-
-### Proposal Validation
-
-The application layer does not trust model proposals.
-
-It rejects proposals when:
-
-- SKU is unknown.
-- product is inactive.
-- quantity is zero.
-- quantity is outside product min/max bounds.
-- SKU already has an open restock order.
-- projected inventory would exceed stock-space capacity.
-
-Rejected proposal details are returned in `DecisionResult`. They are not
-persisted in this checkpoint.
-
-### Fake-Backed Tests
-
-Application tests use hand-written fakes for:
+Implemented application ports:
 
 - `RetailStore`
 - `DecisionRunStore`
-- `ReplenishmentDecisionAgent`
-- `Clock`
-- `IdGenerator`
 
-The fakes store domain types, not database rows. They also support failure
-injection for important paths.
+Supported behavior:
+
+- state existence checks.
+- snapshot loading.
+- direct domain-state seeding through `seed_state`.
+- due restock receipt.
+- sales-day recording.
+- restock order placement.
+- open restock order queries.
+- profit summary calculation.
+- logical shop date advancement.
+- decision-run start, complete, fail, and load.
+
+Multi-write operations run in Diesel transactions.
+
+### Seed Scenario Placeholder
+
+`RetailStore::seed_scenario` is intentionally still a placeholder in this branch:
+
+```text
+scenario YAML loading is added in tutorial/05-scenario-seeding
+```
+
+This keeps branch 04 focused on persistence mechanics. The adapter already has a
+`seed_state` method that tests can use with validated domain objects.
 
 ## Runtime Behavior
 
-The CLI is still intentionally not wired to the application layer:
+The CLI is still not wired to infrastructure:
 
 ```bash
 cargo run
@@ -200,8 +160,6 @@ Expected behavior:
 simulate is parsed but not implemented until a later tutorial branch
 ```
 
-CLI wiring belongs to a later checkpoint after infrastructure adapters exist.
-
 ## Validate This Branch
 
 Run:
@@ -217,228 +175,197 @@ The test suite now covers:
 
 - runtime config and CLI shell behavior.
 - domain invariants and deterministic services.
-- seeding requiring reset when state already exists.
-- simulation receiving due restocks before sales.
-- simulation recording lost sales.
-- application propagation of store failures.
-- ranked restock options by expected profit per occupied space.
-- accepted decision-agent proposals being persisted.
-- capacity overflow proposals being rejected.
-- inactive product proposals being rejected.
-- decision runs being marked failed on agent and transaction failures.
-- workflow cycles deciding on day zero and on each interval.
+- application use cases with fakes.
+- migrated SQLite state seeding through domain objects.
+- shop date advancement.
+- due restock receipt and inventory updates.
+- sales-day recording and profit summary.
+- transaction rollback on duplicate sale IDs.
+- foreign-key violation mapping.
+- unique violation mapping.
+- invalid persisted product data mapping.
+- explicit deferral of YAML scenario loading to the next branch.
 
 ## Goal For The Next Branch
 
-The next branch is `tutorial/04-diesel-persistence`. It should add relational
-persistence behind the application ports while keeping Diesel private to
-infrastructure.
+The next branch is `tutorial/05-scenario-seeding`. It should add deterministic
+YAML seed data and a scenario loader, then wire `DieselRetailStore::seed_scenario`
+through that loader.
 
 When you finish the next branch, the repository should contain:
 
 ```text
-migrations/
-+-- 2026-06-09-000001_create_retail_state/
-    +-- up.sql
-    +-- down.sql
+data/
++-- retail_scenario.yaml
 src/infrastructure/
-+-- mod.rs
-+-- persistence/
++-- scenario/
     +-- mod.rs
-    +-- schema.rs
 ```
 
-The application layer should not change shape unless a missing port behavior is
-discovered. The CLI may still return placeholder command errors in this branch.
+The CLI may still return placeholder command errors after the next branch. The
+goal is seed-data loading and validation, not runtime command dispatch.
 
-## Step By Step: Reach `tutorial/04-diesel-persistence`
+## Step By Step: Reach `tutorial/05-scenario-seeding`
 
-### 1. Add Diesel Migrations
+### 1. Add The Scenario File
+
+Create `data/retail_scenario.yaml`:
+
+```yaml
+shop:
+  start_date: "2026-06-09"
+  capacity_space_units: 240
+
+products:
+  - sku: "TSH-ACME-M-BLK"
+    item_type: "shirt"
+    brand: "Acme"
+    size: "M"
+    unit_cost_cents: 1200
+    unit_price_cents: 2999
+    space_units: 2
+    initial_on_hand: 18
+    daily_demand_rate: "2.750"
+    restock_lead_time_days: 4
+    min_order_quantity: 6
+    max_order_quantity: 36
+```
+
+Add several products so simulation and restock scoring have meaningful variety:
+
+- a fast-moving low-space item.
+- a high-margin larger item.
+- a moderate-demand footwear item.
+- an accessory with high demand and low space cost.
+
+Keep demand rates quoted strings. They are fixed-point decimal inputs, not
+floats.
+
+### 2. Create The Scenario Module
 
 Create:
 
 ```text
-migrations/2026-06-09-000001_create_retail_state/up.sql
-migrations/2026-06-09-000001_create_retail_state/down.sql
-```
-
-The schema should include:
-
-- `shop_state`
-  - one logical row.
-  - current simulation date.
-  - stock-space capacity.
-- `products`
-  - SKU primary key.
-  - apparel type, brand, and size text.
-  - money, space, demand, lead time, order bounds, and active fields.
-- `inventory`
-  - SKU primary key and product foreign key.
-  - on-hand units.
-  - fixed-point demand backlog.
-- `sales_orders`
-  - ID primary key.
-  - sale date.
-  - SKU foreign key.
-  - requested, fulfilled, and lost units.
-  - revenue and cost.
-- `restock_orders`
-  - ID primary key.
-  - SKU foreign key.
-  - quantity.
-  - order date.
-  - ETA.
-  - status constrained to `open`, `received`, or `cancelled`.
-  - decision run ID.
-  - rationale.
-- `decision_runs`
-  - ID primary key.
-  - decision date.
-  - horizon days.
-  - status constrained to `started`, `completed`, or `failed`.
-  - summary.
-  - created restock count.
-
-Add database constraints that mirror important domain invariants. The domain
-prevents invalid construction; the database protects persisted integrity.
-
-### 2. Create The Persistence Module
-
-Create:
-
-```text
-src/infrastructure/persistence/mod.rs
-src/infrastructure/persistence/schema.rs
+src/infrastructure/scenario/mod.rs
 ```
 
 Update `src/infrastructure/mod.rs`:
 
 ```rust
-pub mod persistence;
+pub mod scenario;
 ```
 
-`schema.rs` should contain Diesel `table!` declarations. Keep it inside
-infrastructure.
+The scenario module belongs in infrastructure because it owns file IO, YAML
+DTOs, and external data shape.
 
-### 3. Add Infrastructure Errors
+### 3. Define YAML DTOs
 
-In `persistence/mod.rs`, define `InfrastructureError`.
+In `scenario/mod.rs`, define private DTO structs:
+
+- `ScenarioDocument`
+- `ShopDto`
+- `ProductDto`
+
+Use `serde::Deserialize` on DTOs only. Do not derive serde traits on domain
+types just to parse YAML.
+
+Expected YAML fields:
+
+- `shop.start_date`
+- `shop.capacity_space_units`
+- `products[].sku`
+- `products[].item_type`
+- `products[].brand`
+- `products[].size`
+- `products[].unit_cost_cents`
+- `products[].unit_price_cents`
+- `products[].space_units`
+- `products[].initial_on_hand`
+- `products[].daily_demand_rate`
+- `products[].restock_lead_time_days`
+- `products[].min_order_quantity`
+- `products[].max_order_quantity`
+
+### 4. Add Scenario Errors
+
+Define `ScenarioError` with `thiserror`.
 
 Recommended variants:
 
-- connection pool failure.
-- migration failure.
-- Diesel query failure.
-- invalid persisted data.
-- unique violation.
-- foreign-key violation.
-- serialization or transaction failure.
+- read failure with path context.
+- YAML parse failure with path context.
+- domain conversion failure.
+- duplicate SKU.
+- empty product list.
+- initial inventory exceeding capacity.
 
-Preserve source errors where possible. Map infrastructure errors into
-`ApplicationError` at the adapter boundary so application APIs do not expose
-Diesel types.
+Preserve IO and YAML source errors.
 
-### 4. Add Pool And Migration Helpers
+### 5. Convert DTOs Into Domain State
 
-Add:
+Add `ScenarioYamlLoader::load(path) -> Result<SeedRetailState, ScenarioError>`.
 
-- `create_pool(database_url: String)`
-- `run_migrations(pool)`
+Conversion rules:
 
-Use an r2d2-backed SQLite pool. The pool is useful later because Rig tools and
-workflow adapters need `Send + Sync` boundaries without sharing raw SQLite
-connections.
+- Parse `shop.start_date` into `SimulationDate`.
+- Convert capacity into `SpaceUnits`.
+- Convert each product row into `Product`.
+- Convert initial inventory into `InventoryPosition`.
+- Parse `daily_demand_rate` as a fixed-point decimal string using
+  `DemandRatePerDay`.
+- Canonicalize SKUs through `Sku`.
+- Reject duplicate SKUs after canonicalization.
+- Reject empty product lists.
+- Reject capacity that cannot hold initial stock.
 
-Run embedded migrations before persistence-backed commands in a later branch.
+Use domain constructors and `TryFrom`/`FromStr`. Do not bypass invariants.
 
-### 5. Add Row And Insert Types
+### 6. Wire Diesel Seeding
 
-Inside the persistence module, define private row and insert structs for:
+In `src/infrastructure/persistence/mod.rs`, replace the placeholder
+`seed_scenario` method:
 
-- shop state.
-- products.
-- inventory.
-- sales orders.
-- restock orders.
-- decision runs.
+```rust
+fn seed_scenario(&mut self, scenario_path: &Path, reset: bool) -> Result<(), ApplicationError> {
+    let state = ScenarioYamlLoader::load(scenario_path)?;
+    self.seed_state(&state, reset)?;
+    Ok(())
+}
+```
 
-Keep Diesel structs private where practical. They are adapter details, not
-application or domain APIs.
+Map `ScenarioError` into `ApplicationError::StoreFailure` with operation
+`"load scenario"` or similarly explicit context.
 
-### 6. Use Checked Row/Domain Conversion
-
-Map rows into domain/application types through `TryFrom`.
-
-Examples:
-
-- product row -> `Product`
-- inventory row -> `InventoryPosition`
-- restock order row -> `RestockOrder`
-- decision run row -> `DecisionRun`
-- sales order row -> `SalesOrder`
-
-When persisted data violates domain constructors, return
-`InfrastructureError::InvalidPersistedData`.
-
-Do not add ad hoc conversion helpers such as `to_domain`, `from_row`, or
-`as_model`. Use `From`, `TryFrom`, `FromStr`, and `Display`.
-
-### 7. Implement Store Adapters
-
-Add:
-
-- `DieselRetailStore`
-- `DieselDecisionRunStore`
-
-Implement the application ports:
-
-- `RetailStore` for `DieselRetailStore`.
-- `DecisionRunStore` for `DieselDecisionRunStore`.
-
-Behavior to support:
-
-- state existence checks.
-- snapshot loading.
-- receiving due restocks.
-- recording one sales day.
-- placing accepted restock orders.
-- open restock queries.
-- profit summary.
-- logical shop date advancement.
-- starting, completing, failing, and loading decision runs.
-
-Wrap multi-write operations in Diesel transactions.
-
-### 8. Keep Scenario Loading Out If Needed
-
-The next branch after persistence is `tutorial/05-scenario-seeding`. If you want
-to keep branch 04 focused, `RetailStore::seed_scenario` may temporarily return a
-structured store failure such as "scenario loading is added in the next branch".
-
-The important checkpoint for branch 04 is persistence mechanics: migrations,
-row mapping, adapter errors, transactions, and read/write behavior against an
-isolated SQLite database.
-
-### 9. Add Infrastructure Tests
-
-Use isolated SQLite databases for adapter tests. Prefer temporary files or
-in-memory connections that run real embedded migrations before each test.
+### 7. Add Scenario Tests
 
 Good tests:
 
-- migrations create the expected tables.
-- decision runs can start, complete, fail, and reload.
-- open restock orders query by status.
-- received restocks update inventory and order status.
-- recording a sales day writes sales and inventory in one transaction.
-- failed multi-write operations roll back.
-- invalid row data maps to invalid persisted data.
-- uniqueness and foreign-key failures preserve useful source errors.
+- loads the bundled scenario file.
+- rejects duplicate SKUs after canonicalization.
+- rejects empty product lists.
+- rejects invalid dates.
+- rejects invalid demand decimal strings.
+- rejects initial stock that exceeds shop capacity.
 
-Normal tests should not call OpenAI and should not rely on developer machine
-state.
+Use temporary files for negative YAML cases.
 
-### 10. Validate The Next Checkpoint
+### 8. Add Persistence Integration For Scenario Seeding
+
+Add or restore a persistence test:
+
+```text
+seeds_scenario_yaml_through_store_port
+```
+
+It should:
+
+- create an isolated SQLite database.
+- run real migrations.
+- call `store.seed_scenario("data/retail_scenario.yaml", true)`.
+- load a snapshot.
+- assert the expected date, product count, and inventory count.
+
+### 9. Validate The Next Checkpoint
 
 Run:
 
@@ -452,10 +379,10 @@ cargo run
 Expected state at the end:
 
 - Runtime help still works with no mutation.
-- Domain and application tests still pass.
-- Diesel adapter tests pass against isolated migrated SQLite databases.
-- Diesel schema, row structs, and migrations stay inside infrastructure.
-- Domain and application APIs do not expose Diesel types.
+- Domain, application, and persistence tests still pass.
+- Scenario loader tests pass without OpenAI or network access.
+- `DieselRetailStore::seed_scenario` works through the YAML loader.
+- Domain and application APIs still do not expose YAML DTOs or Diesel rows.
 
 ## Branch Ladder
 
