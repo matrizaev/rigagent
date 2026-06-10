@@ -8,8 +8,9 @@ use thiserror::Error;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use crate::application::retail::{
-    AdvanceSimulation, AdvanceSimulationResult, ApplicationError, DecisionResult, RetailSnapshot,
-    RunRestockDecision, RunWorkflowCycle, SeedRetailScenario, WorkflowCycleResult,
+    AcceptedRestockOrder, AdvanceSimulation, AdvanceSimulationResult, ApplicationError,
+    DecisionResult, RejectedRestockProposal, RetailSnapshot, RunRestockDecision, RunWorkflowCycle,
+    SeedRetailScenario, WorkflowCycleResult,
 };
 use crate::config::AppConfig;
 use crate::domain::retail::{
@@ -167,14 +168,60 @@ where
     write_line(
         output,
         format!(
-            "decision {} accepted {} order(s), rejected {} proposal(s): {}",
+            "decision {} accepted {} order(s), rejected {} proposal(s)",
             result.decision_run_id,
             result.accepted_orders.len(),
             result.rejected_proposals.len(),
-            result.summary
         ),
     )
-    .await
+    .await?;
+
+    if !result.accepted_orders.is_empty() {
+        write_line(output, "accepted orders:".to_owned()).await?;
+        for accepted in &result.accepted_orders {
+            write_line(output, format_accepted_order(accepted)).await?;
+        }
+    }
+
+    if !result.rejected_proposals.is_empty() {
+        write_line(output, "rejected proposals:".to_owned()).await?;
+        for rejected in &result.rejected_proposals {
+            write_line(output, format_rejected_proposal(rejected)).await?;
+        }
+    }
+
+    let summary = result.summary.trim();
+    if !summary.is_empty() && result.rejected_proposals.is_empty() {
+        write_line(output, format!("agent summary: {summary}")).await?;
+    } else if !summary.is_empty() {
+        write_line(
+            output,
+            "agent summary omitted because one or more proposals failed application validation"
+                .to_owned(),
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+fn format_accepted_order(accepted: &AcceptedRestockOrder) -> String {
+    format!(
+        "- {}: {} unit(s), eta {}, rationale: {}",
+        accepted.order.sku(),
+        accepted.order.quantity().units(),
+        accepted.order.eta(),
+        accepted.order.rationale()
+    )
+}
+
+fn format_rejected_proposal(rejected: &RejectedRestockProposal) -> String {
+    format!(
+        "- {}: {} unit(s), reason: {}",
+        rejected.sku,
+        rejected.quantity.units(),
+        rejected.reason
+    )
 }
 
 pub(crate) async fn write_cycle_result<W>(
@@ -480,16 +527,16 @@ impl RunCycleArgs {
 mod tests {
     use super::{
         Cli, CliError, Command, RunCycleArgs, SeedArgs, SimulateArgs, render_default_help,
-        required_openai_key, write_status_result,
+        required_openai_key, write_decision_result, write_status_result,
     };
     use chrono::NaiveDate;
 
     use crate::application::retail::{ProfitSummary, RetailSnapshot};
     use crate::config::AppConfig;
     use crate::domain::retail::{
-        ApparelKind, Brand, DemandBacklog, DemandRatePerDay, InventoryPosition, LeadTimeDays,
-        MoneyCents, Product, ProductDetails, SimulationDate, SizeLabel, Sku, SpaceUnits,
-        StockQuantity,
+        ApparelKind, Brand, DecisionRunId, DemandBacklog, DemandRatePerDay, InventoryPosition,
+        LeadTimeDays, MoneyCents, Product, ProductDetails, SimulationDate, SizeLabel, Sku,
+        SpaceUnits, StockQuantity,
     };
 
     #[tokio::test]
@@ -624,6 +671,38 @@ mod tests {
         ));
         assert!(rendered.contains("open restocks: none"));
         assert!(rendered.contains("sales orders recorded: 0"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn decision_result_renders_rejected_proposal_reasons()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let result = crate::application::retail::DecisionResult {
+            decision_run_id: DecisionRunId::new("decision-1")?,
+            accepted_orders: Vec::new(),
+            rejected_proposals: vec![crate::application::retail::RejectedRestockProposal {
+                sku: Sku::new("sho-urbn-9-wht")?,
+                quantity: StockQuantity::new(24),
+                reason:
+                    "proposal for SKU SHO-URBN-9-WHT exceeds capacity: requested 290, capacity 240"
+                        .to_owned(),
+            }],
+            summary: "Placed 1 validated restock order".to_owned(),
+        };
+        let mut output = Vec::new();
+
+        write_decision_result(&mut output, result).await?;
+
+        let rendered = String::from_utf8(output)?;
+        assert!(rendered.contains("accepted 0 order(s), rejected 1 proposal(s)"));
+        assert!(rendered.contains("rejected proposals:"));
+        assert!(rendered.contains(
+            "- SHO-URBN-9-WHT: 24 unit(s), reason: proposal for SKU SHO-URBN-9-WHT exceeds capacity: requested 290, capacity 240"
+        ));
+        assert!(rendered.contains(
+            "agent summary omitted because one or more proposals failed application validation"
+        ));
+        assert!(!rendered.contains("Placed 1 validated restock order"));
         Ok(())
     }
 
