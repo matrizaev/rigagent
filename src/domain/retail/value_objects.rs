@@ -309,6 +309,20 @@ impl SpaceUnits {
             })
     }
 
+    /// Checked subtraction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `other` is greater than `self`.
+    pub fn checked_sub(self, other: Self) -> Result<Self, DomainError> {
+        self.0
+            .checked_sub(other.0)
+            .map(Self)
+            .ok_or(DomainError::InsufficientValue {
+                operation: "space subtraction",
+            })
+    }
+
     /// Checked multiplication by a stock quantity.
     ///
     /// # Errors

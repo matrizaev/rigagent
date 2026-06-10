@@ -79,15 +79,19 @@ pub enum ApplicationError {
         /// Duplicate SKU.
         sku: Sku,
     },
-    /// A proposal would exceed projected capacity.
-    #[error("proposal for SKU {sku} exceeds capacity: requested {requested}, capacity {capacity}")]
+    /// A proposal would exceed projected available capacity.
+    #[error(
+        "proposal for SKU {sku} exceeds available capacity: requires {required}, available {available}, overflow {overflow}"
+    )]
     CapacityOverflowProposal {
         /// Proposed SKU.
         sku: Sku,
-        /// Requested occupied space.
-        requested: SpaceUnits,
-        /// Available capacity.
-        capacity: SpaceUnits,
+        /// Space required by the proposal.
+        required: SpaceUnits,
+        /// Space available before the proposal.
+        available: SpaceUnits,
+        /// Space units by which the proposal exceeds available capacity.
+        overflow: SpaceUnits,
     },
     /// A store port failed.
     #[error("retail store failed during {operation}: {source}")]
