@@ -1,1 +1,4 @@
-//! Framework-free retail business rules and value types.
+//! Framework-free business rules.
+
+/// Retail replenishment business rules.
+pub mod retail;
