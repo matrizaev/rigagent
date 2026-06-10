@@ -1,4 +1,4 @@
-chat_model: gpt-5-nano
+chat_model: gpt-5.4-nano
 retail_db_path: data/retail.sqlite
 retail_scenario_path: data/retail_scenario.yaml
 decision_horizon_days: 14
