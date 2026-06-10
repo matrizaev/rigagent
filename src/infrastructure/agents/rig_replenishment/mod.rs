@@ -794,6 +794,7 @@ mod tests {
             inventory: inventory.clone(),
             open_inbound_quantity: StockQuantity::new(0),
             capacity: SpaceUnits::new(60),
+            reserved_capacity: SpaceUnits::new(0),
             current_date,
             horizon: DecisionHorizonDays::new(14)?,
         })?

@@ -684,7 +684,7 @@ mod tests {
                 sku: Sku::new("sho-urbn-9-wht")?,
                 quantity: StockQuantity::new(24),
                 reason:
-                    "proposal for SKU SHO-URBN-9-WHT exceeds capacity: requested 290, capacity 240"
+                    "proposal for SKU SHO-URBN-9-WHT exceeds available capacity: requires 96, available 46, overflow 50"
                         .to_owned(),
             }],
             summary: "Placed 1 validated restock order".to_owned(),
@@ -697,7 +697,7 @@ mod tests {
         assert!(rendered.contains("accepted 0 order(s), rejected 1 proposal(s)"));
         assert!(rendered.contains("rejected proposals:"));
         assert!(rendered.contains(
-            "- SHO-URBN-9-WHT: 24 unit(s), reason: proposal for SKU SHO-URBN-9-WHT exceeds capacity: requested 290, capacity 240"
+            "- SHO-URBN-9-WHT: 24 unit(s), reason: proposal for SKU SHO-URBN-9-WHT exceeds available capacity: requires 96, available 46, overflow 50"
         ));
         assert!(rendered.contains(
             "agent summary omitted because one or more proposals failed application validation"
