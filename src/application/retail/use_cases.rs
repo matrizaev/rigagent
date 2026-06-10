@@ -336,15 +336,21 @@ fn ranked_options(
     snapshot: &RetailSnapshot,
     horizon: crate::domain::retail::DecisionHorizonDays,
 ) -> Result<Vec<RestockOption>, ApplicationError> {
+    let total_projected_space = projected_space(snapshot, &snapshot.open_restocks, None)?;
     let mut options = Vec::new();
     for product in &snapshot.products {
         let inventory = inventory_for(&snapshot.inventory, product.sku())?;
         let inbound = open_inbound_quantity(&snapshot.open_restocks, product.sku())?;
+        let projected_space_for_sku = product
+            .unit_space()
+            .checked_mul_quantity(inventory.on_hand().checked_add(inbound)?)?;
+        let reserved_capacity = total_projected_space.checked_sub(projected_space_for_sku)?;
         let scored = RestockOptionScorer::score(&RestockOptionRequest {
             product: product.clone(),
             inventory: inventory.clone(),
             open_inbound_quantity: inbound,
             capacity: snapshot.capacity,
+            reserved_capacity,
             current_date: snapshot.current_date,
             horizon,
         });
@@ -429,12 +435,16 @@ where
         });
     }
 
-    let projected_space = projected_space(snapshot, projected_orders, Some(proposal))?;
-    if projected_space > snapshot.capacity {
+    let projected_capacity = projected_space(snapshot, projected_orders, Some(proposal))?;
+    if projected_capacity > snapshot.capacity {
+        let used_space = projected_space(snapshot, projected_orders, None)?;
+        let required = projected_capacity.checked_sub(used_space)?;
+        let available = snapshot.capacity.checked_sub(used_space)?;
         return Err(ApplicationError::CapacityOverflowProposal {
             sku: proposal.sku.clone(),
-            requested: projected_space,
-            capacity: snapshot.capacity,
+            required,
+            available,
+            overflow: required.checked_sub(available)?,
         });
     }
 
@@ -1107,6 +1117,14 @@ mod tests {
 
         assert_eq!(result.accepted_orders.len(), 0);
         assert_eq!(result.rejected_proposals.len(), 1);
+        let rejected = result
+            .rejected_proposals
+            .first()
+            .ok_or_else(|| ApplicationError::store_failure("test rejection lookup", "missing"))?;
+        assert_eq!(
+            rejected.reason,
+            "proposal for SKU SHIRT-1 exceeds available capacity: requires 20, available 10, overflow 10"
+        );
         assert_eq!(workflow.store().restocks.len(), 0);
         Ok(())
     }
@@ -1249,6 +1267,44 @@ mod tests {
         })?;
 
         assert_eq!(first.sku(), compact.sku());
+        Ok(())
+    }
+
+    #[test]
+    fn ranked_options_use_global_available_capacity() -> Result<(), ApplicationError> {
+        let stocked = product("stocked-1", "1.000", 10)?;
+        let candidate = product("candidate-1", "50.000", 4)?;
+        let snapshot = RetailSnapshot {
+            current_date: test_date()?,
+            capacity: SpaceUnits::new(240),
+            products: vec![stocked, candidate.clone()],
+            inventory: vec![
+                InventoryPosition::new(
+                    Sku::new("stocked-1")?,
+                    StockQuantity::new(19),
+                    DemandBacklog::ZERO,
+                ),
+                InventoryPosition::new(
+                    candidate.sku().clone(),
+                    StockQuantity::new(0),
+                    DemandBacklog::ZERO,
+                ),
+            ],
+            open_restocks: Vec::new(),
+            recent_sales: Vec::new(),
+            profit_summary: ProfitSummary::zero(),
+        };
+
+        let options = ranked_options(&snapshot, DecisionHorizonDays::new(14)?)?;
+        let option = options
+            .iter()
+            .find(|option| option.sku() == candidate.sku())
+            .ok_or_else(|| {
+                ApplicationError::store_failure("test ranked option lookup", "missing candidate")
+            })?;
+
+        assert_eq!(option.quantity(), StockQuantity::new(12));
+        assert_eq!(option.occupied_space(), SpaceUnits::new(48));
         Ok(())
     }
 }

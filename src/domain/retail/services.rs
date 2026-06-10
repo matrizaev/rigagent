@@ -67,6 +67,8 @@ pub struct RestockOptionRequest {
     pub open_inbound_quantity: StockQuantity,
     /// Total available stock-space capacity.
     pub capacity: SpaceUnits,
+    /// Capacity already occupied by other SKUs and open inbound orders.
+    pub reserved_capacity: SpaceUnits,
     /// Decision date.
     pub current_date: SimulationDate,
     /// Decision horizon.
@@ -143,10 +145,13 @@ impl RestockOptionScorer {
             .inventory
             .on_hand()
             .checked_add(request.open_inbound_quantity)?;
-        let projected_space = request
+        let projected_space_for_sku = request
             .product
             .unit_space()
             .checked_mul_quantity(projected_units)?;
+        let projected_space = request
+            .reserved_capacity
+            .checked_add(projected_space_for_sku)?;
         if projected_space > request.capacity {
             return Err(DomainError::CapacityExceeded {
                 requested: projected_space,
@@ -303,6 +308,7 @@ mod tests {
             ),
             open_inbound_quantity: StockQuantity::new(0),
             capacity: SpaceUnits::new(60),
+            reserved_capacity: SpaceUnits::new(0),
             current_date: SimulationDate::new(date),
             horizon: DecisionHorizonDays::new(14)?,
         })?
@@ -327,12 +333,51 @@ mod tests {
             ),
             open_inbound_quantity: StockQuantity::new(0),
             capacity: SpaceUnits::new(1_000),
+            reserved_capacity: SpaceUnits::new(0),
             current_date: SimulationDate::new(date),
             horizon: DecisionHorizonDays::new(14)?,
         })?
         .ok_or("expected restock option")?;
 
         assert_eq!(option.quantity(), product.max_order_quantity());
+        Ok(())
+    }
+
+    #[test]
+    fn caps_restock_option_by_reserved_capacity() -> Result<(), Box<dyn std::error::Error>> {
+        let product = Product::from_details(ProductDetails {
+            sku: Sku::new("shirt-1")?,
+            kind: ApparelKind::Shirt,
+            brand: Brand::new("North")?,
+            size: SizeLabel::M,
+            unit_cost: MoneyCents::new(1_000),
+            unit_price: MoneyCents::new(2_500),
+            unit_space: SpaceUnits::new(2),
+            demand_rate: DemandRatePerDay::from_milli_units(50_000),
+            lead_time: LeadTimeDays::new(1)?,
+            min_order_quantity: StockQuantity::new(1),
+            max_order_quantity: StockQuantity::new(50),
+            active: true,
+        })?;
+        let date = NaiveDate::from_ymd_opt(2026, 6, 9).ok_or("valid test date")?;
+
+        let option = RestockOptionScorer::score(&RestockOptionRequest {
+            product: product.clone(),
+            inventory: InventoryPosition::new(
+                product.sku().clone(),
+                StockQuantity::new(0),
+                DemandBacklog::ZERO,
+            ),
+            open_inbound_quantity: StockQuantity::new(0),
+            capacity: SpaceUnits::new(100),
+            reserved_capacity: SpaceUnits::new(94),
+            current_date: SimulationDate::new(date),
+            horizon: DecisionHorizonDays::new(14)?,
+        })?
+        .ok_or("expected restock option")?;
+
+        assert_eq!(option.quantity(), StockQuantity::new(3));
+        assert_eq!(option.occupied_space(), SpaceUnits::new(6));
         Ok(())
     }
 }
