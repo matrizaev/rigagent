@@ -1,11 +1,47 @@
 //! Application-owned errors for retail use cases.
 
+use std::error::Error;
+use std::fmt::{self, Display, Formatter};
+use std::sync::Arc;
+
 use thiserror::Error;
 
 use crate::domain::retail::{DecisionRunId, DomainError, Sku, SpaceUnits, StockQuantity};
 
+/// Shared source error stored without coupling application code to adapter error types.
+#[derive(Debug, Clone)]
+pub struct SharedError {
+    source: Arc<dyn Error + Send + Sync + 'static>,
+}
+
+impl SharedError {
+    /// Create a shared source error.
+    #[must_use]
+    pub fn new(source: impl Error + Send + Sync + 'static) -> Self {
+        Self {
+            source: Arc::new(source),
+        }
+    }
+}
+
+impl Display for SharedError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        Display::fmt(&self.source, formatter)
+    }
+}
+
+impl Error for SharedError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+#[derive(Debug, Error, Clone)]
+#[error("{0}")]
+struct MessageError(String);
+
 /// Retail application failures.
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Error, Clone)]
 pub enum ApplicationError {
     /// A domain invariant failed while executing a use case.
     #[error("domain invariant failed")]
@@ -17,6 +53,12 @@ pub enum ApplicationError {
     #[error("SKU {sku} was not found")]
     SkuNotFound {
         /// Missing SKU.
+        sku: Sku,
+    },
+    /// A product exists but cannot currently be restocked.
+    #[error("SKU {sku} is inactive")]
+    InactiveProduct {
+        /// Inactive SKU.
         sku: Sku,
     },
     /// Inventory was not found for a product SKU.
@@ -48,26 +90,38 @@ pub enum ApplicationError {
         capacity: SpaceUnits,
     },
     /// A store port failed.
-    #[error("retail store failed during {operation}: {message}")]
+    #[error("retail store failed during {operation}: {source}")]
     StoreFailure {
         /// Failed operation.
         operation: &'static str,
-        /// Failure detail from the adapter.
-        message: String,
+        /// Source failure from the adapter.
+        #[source]
+        source: SharedError,
     },
     /// A decision-run store port failed.
-    #[error("decision run store failed during {operation}: {message}")]
+    #[error("decision run store failed during {operation}: {source}")]
     DecisionRunStoreFailure {
         /// Failed operation.
         operation: &'static str,
-        /// Failure detail from the adapter.
-        message: String,
+        /// Source failure from the adapter.
+        #[source]
+        source: SharedError,
+    },
+    /// A clock port failed.
+    #[error("clock failed during {operation}: {source}")]
+    ClockFailure {
+        /// Failed operation.
+        operation: &'static str,
+        /// Source failure from the clock adapter.
+        #[source]
+        source: SharedError,
     },
     /// The decision agent failed.
-    #[error("decision agent failed: {message}")]
+    #[error("decision agent failed: {source}")]
     AgentFailure {
-        /// Failure detail from the adapter.
-        message: String,
+        /// Source failure from the agent adapter.
+        #[source]
+        source: SharedError,
     },
     /// A decision run could not be found.
     #[error("decision run {run_id} was not found")]
@@ -95,4 +149,50 @@ pub enum ApplicationError {
         /// Proposed quantity.
         quantity: StockQuantity,
     },
+}
+
+impl ApplicationError {
+    /// Create a store failure from a displayable message.
+    #[must_use]
+    pub fn store_failure(operation: &'static str, message: impl Into<String>) -> Self {
+        Self::StoreFailure {
+            operation,
+            source: SharedError::new(MessageError(message.into())),
+        }
+    }
+
+    /// Create a decision-run store failure from a displayable message.
+    #[must_use]
+    pub fn decision_run_store_failure(operation: &'static str, message: impl Into<String>) -> Self {
+        Self::DecisionRunStoreFailure {
+            operation,
+            source: SharedError::new(MessageError(message.into())),
+        }
+    }
+
+    /// Create a clock failure from a source error.
+    #[must_use]
+    pub fn clock_failure(
+        operation: &'static str,
+        source: impl Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::ClockFailure {
+            operation,
+            source: SharedError::new(source),
+        }
+    }
+
+    /// Create an agent failure from a source error.
+    #[must_use]
+    pub fn agent_failure(source: impl Error + Send + Sync + 'static) -> Self {
+        Self::AgentFailure {
+            source: SharedError::new(source),
+        }
+    }
+
+    /// Create an agent failure from a displayable message.
+    #[must_use]
+    pub fn agent_failure_message(message: impl Into<String>) -> Self {
+        Self::agent_failure(MessageError(message.into()))
+    }
 }

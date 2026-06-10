@@ -16,8 +16,8 @@ use crate::application::retail::{
     ProposedRestockOrder, ReplenishmentDecisionAgent, RetailSnapshot,
 };
 use crate::domain::retail::{
-    ApparelKind, DomainError, InventoryPosition, Product, RestockOption, RestockOrder,
-    RestockOrderStatus, SizeLabel, Sku, StockQuantity,
+    DomainError, InventoryPosition, Product, RestockOption, RestockOrder, RestockOrderStatus, Sku,
+    StockQuantity,
 };
 
 const PREAMBLE: &str = "You are an autonomous retail replenishment planner. Inspect the provided tools, propose only validated supplier restock orders, and finish with a concise operational summary.";
@@ -79,9 +79,10 @@ impl CompletionRunner for RigOpenAiCompletion {
         let client = match openai::Client::new(self.api_key.clone()) {
             Ok(client) => client,
             Err(error) => {
-                return Err(ApplicationError::AgentFailure {
-                    message: format!("openai client setup failed: {error}"),
-                });
+                return Err(ApplicationError::agent_failure(AgentAdapterError {
+                    context: "openai client setup failed",
+                    source: error,
+                }));
             }
         };
 
@@ -99,9 +100,10 @@ impl CompletionRunner for RigOpenAiCompletion {
 
         match agent.prompt(decision_prompt(request)).await {
             Ok(summary) => Ok(summary),
-            Err(error) => Err(ApplicationError::AgentFailure {
-                message: format!("provider decision failed: {error}"),
-            }),
+            Err(error) => Err(ApplicationError::agent_failure(AgentAdapterError {
+                context: "provider decision failed",
+                source: error,
+            })),
         }
     }
 }
@@ -272,9 +274,9 @@ fn session_lock(
 ) -> Result<MutexGuard<'_, DecisionSession>, ApplicationError> {
     match session.lock() {
         Ok(guard) => Ok(guard),
-        Err(_error) => Err(ApplicationError::AgentFailure {
-            message: "decision session lock was poisoned".to_owned(),
-        }),
+        Err(_error) => Err(ApplicationError::agent_failure_message(
+            "decision session lock was poisoned",
+        )),
     }
 }
 
@@ -296,8 +298,20 @@ enum DecisionSessionError {
     #[error("count overflow while computing {operation}")]
     CountOverflow {
         operation: &'static str,
+        #[source]
         source: std::num::TryFromIntError,
     },
+}
+
+#[derive(Debug, Error)]
+#[error("{context}: {source}")]
+struct AgentAdapterError<E>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    context: &'static str,
+    #[source]
+    source: E,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -345,7 +359,7 @@ impl TryFrom<&RetailSnapshot> for InventorySnapshotOutput {
 #[derive(Debug, Clone, Serialize)]
 struct ProductView {
     sku: String,
-    apparel_kind: &'static str,
+    apparel_kind: String,
     brand: String,
     size: String,
     unit_cost_cents: u64,
@@ -365,9 +379,9 @@ impl TryFrom<&Product> for ProductView {
     fn try_from(product: &Product) -> Result<Self, Self::Error> {
         Ok(Self {
             sku: product.sku().to_string(),
-            apparel_kind: apparel_kind_label(product.kind()),
+            apparel_kind: product.kind().to_string(),
             brand: product.brand().to_string(),
-            size: size_label(product.size()),
+            size: product.size().to_string(),
             unit_cost_cents: product.unit_cost().cents(),
             unit_price_cents: product.unit_price().cents(),
             unit_margin_cents: product.unit_margin()?.cents(),
@@ -662,29 +676,6 @@ fn empty_parameters() -> serde_json::Value {
     })
 }
 
-const fn apparel_kind_label(kind: ApparelKind) -> &'static str {
-    match kind {
-        ApparelKind::Shirt => "shirt",
-        ApparelKind::Pants => "pants",
-        ApparelKind::Jacket => "jacket",
-        ApparelKind::Dress => "dress",
-        ApparelKind::Shoes => "shoes",
-        ApparelKind::Accessory => "accessory",
-    }
-}
-
-fn size_label(size: SizeLabel) -> String {
-    match size {
-        SizeLabel::Xs => "XS".to_owned(),
-        SizeLabel::S => "S".to_owned(),
-        SizeLabel::M => "M".to_owned(),
-        SizeLabel::L => "L".to_owned(),
-        SizeLabel::Xl => "XL".to_owned(),
-        SizeLabel::Xxl => "XXL".to_owned(),
-        SizeLabel::Numeric(value) => value.to_string(),
-    }
-}
-
 const fn restock_status_label(status: RestockOrderStatus) -> &'static str {
     match status {
         RestockOrderStatus::Open => "open",
@@ -753,11 +744,10 @@ mod tests {
             .err()
             .ok_or("expected adapter failure")?;
 
+        assert!(matches!(error, ApplicationError::AgentFailure { .. }));
         assert_eq!(
-            error,
-            ApplicationError::AgentFailure {
-                message: "fake provider failure".to_owned()
-            }
+            error.to_string(),
+            "decision agent failed: fake provider failure"
         );
         Ok(())
     }
@@ -771,9 +761,9 @@ mod tests {
             _request: &DecisionAgentRequest,
             _session: SharedDecisionSession,
         ) -> Result<String, ApplicationError> {
-            Err(ApplicationError::AgentFailure {
-                message: "fake provider failure".to_owned(),
-            })
+            Err(ApplicationError::agent_failure_message(
+                "fake provider failure",
+            ))
         }
     }
 

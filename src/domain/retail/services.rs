@@ -177,9 +177,18 @@ impl RestockOptionScorer {
             return Ok(None);
         }
 
-        let requested_quantity = request
-            .product
-            .bounded_order_quantity(capacity_limited_quantity)?;
+        let requested_quantity = if capacity_limited_quantity > request.product.max_order_quantity()
+        {
+            request.product.max_order_quantity()
+        } else {
+            capacity_limited_quantity
+        };
+
+        if requested_quantity < request.product.min_order_quantity() {
+            return Ok(None);
+        }
+
+        let requested_quantity = request.product.bounded_order_quantity(requested_quantity)?;
         let demand_limited_quantity = demand_within_horizon(
             request.product.demand_rate(),
             request.horizon,
@@ -301,6 +310,29 @@ mod tests {
 
         assert_eq!(option.sku(), product.sku());
         assert!(option.expected_profit().cents() > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn caps_restock_option_at_product_max_when_capacity_is_larger()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let product = product()?;
+        let date = NaiveDate::from_ymd_opt(2026, 6, 9).ok_or("valid test date")?;
+        let option = RestockOptionScorer::score(&RestockOptionRequest {
+            product: product.clone(),
+            inventory: InventoryPosition::new(
+                product.sku().clone(),
+                StockQuantity::new(0),
+                DemandBacklog::ZERO,
+            ),
+            open_inbound_quantity: StockQuantity::new(0),
+            capacity: SpaceUnits::new(1_000),
+            current_date: SimulationDate::new(date),
+            horizon: DecisionHorizonDays::new(14)?,
+        })?
+        .ok_or("expected restock option")?;
+
+        assert_eq!(option.quantity(), product.max_order_quantity());
         Ok(())
     }
 }

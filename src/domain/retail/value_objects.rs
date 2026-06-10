@@ -50,6 +50,14 @@ impl FromStr for Sku {
     }
 }
 
+impl TryFrom<String> for Sku {
+    type Error = DomainError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
 /// Product brand display name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Brand(String);
@@ -115,6 +123,38 @@ pub enum ApparelKind {
     Accessory,
 }
 
+impl Display for ApparelKind {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Shirt => "shirt",
+            Self::Pants => "pants",
+            Self::Jacket => "jacket",
+            Self::Dress => "dress",
+            Self::Shoes => "shoes",
+            Self::Accessory => "accessory",
+        })
+    }
+}
+
+impl FromStr for ApparelKind {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim() {
+            "shirt" => Ok(Self::Shirt),
+            "pants" => Ok(Self::Pants),
+            "jacket" => Ok(Self::Jacket),
+            "dress" => Ok(Self::Dress),
+            "shoes" => Ok(Self::Shoes),
+            "accessory" => Ok(Self::Accessory),
+            invalid => Err(DomainError::InvalidText {
+                field: "apparel_kind",
+                value: invalid.to_owned(),
+            }),
+        }
+    }
+}
+
 /// Common apparel size labels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SizeLabel {
@@ -132,6 +172,44 @@ pub enum SizeLabel {
     Xxl,
     /// Numeric size.
     Numeric(u16),
+}
+
+impl Display for SizeLabel {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Xs => formatter.write_str("XS"),
+            Self::S => formatter.write_str("S"),
+            Self::M => formatter.write_str("M"),
+            Self::L => formatter.write_str("L"),
+            Self::Xl => formatter.write_str("XL"),
+            Self::Xxl => formatter.write_str("XXL"),
+            Self::Numeric(value) => write!(formatter, "{value}"),
+        }
+    }
+}
+
+impl FromStr for SizeLabel {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim() {
+            "XS" => Ok(Self::Xs),
+            "S" => Ok(Self::S),
+            "M" => Ok(Self::M),
+            "L" => Ok(Self::L),
+            "XL" => Ok(Self::Xl),
+            "XXL" => Ok(Self::Xxl),
+            numeric => {
+                numeric
+                    .parse::<u16>()
+                    .map(Self::Numeric)
+                    .map_err(|_| DomainError::InvalidText {
+                        field: "size_label",
+                        value: numeric.to_owned(),
+                    })
+            }
+        }
+    }
 }
 
 /// Non-negative money amount in cents.

@@ -1,12 +1,37 @@
 //! Retail application read models.
 
 use crate::domain::retail::{
-    MoneyCents, Product, RestockOrder, SalesOrder, SimulationDate, StockQuantity,
+    DecisionRunId, InventoryPosition, MoneyCents, Product, RestockOrder, SalesOrder,
+    SimulationDate, Sku, SpaceUnits, StockQuantity,
 };
 
 /// Query for the current retail snapshot.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GetRetailSnapshot;
+
+/// Count of workflow events, such as recorded sales orders or decision runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EventCount(u64);
+
+impl EventCount {
+    /// Create an event count.
+    #[must_use]
+    pub const fn new(count: u64) -> Self {
+        Self(count)
+    }
+
+    /// Return the counted events.
+    #[must_use]
+    pub const fn count(self) -> u64 {
+        self.0
+    }
+
+    /// Checked addition.
+    #[must_use]
+    pub fn checked_add(self, other: Self) -> Option<Self> {
+        self.0.checked_add(other.0).map(Self)
+    }
+}
 
 /// Current retail state used by application use cases.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,11 +39,11 @@ pub struct RetailSnapshot {
     /// Current logical shop date.
     pub current_date: SimulationDate,
     /// Total stock-space capacity.
-    pub capacity: crate::domain::retail::SpaceUnits,
+    pub capacity: SpaceUnits,
     /// Products in the shop catalog.
     pub products: Vec<Product>,
     /// Inventory positions by SKU.
-    pub inventory: Vec<crate::domain::retail::InventoryPosition>,
+    pub inventory: Vec<InventoryPosition>,
     /// Open supplier restock orders.
     pub open_restocks: Vec<RestockOrder>,
     /// Recent simulated sales orders.
@@ -61,9 +86,9 @@ pub struct AdvanceSimulationResult {
     /// Number of simulated days.
     pub days_advanced: u64,
     /// Number of restock orders received.
-    pub received_restock_count: StockQuantity,
+    pub received_restock_count: EventCount,
     /// Number of sales orders recorded.
-    pub sales_order_count: StockQuantity,
+    pub sales_order_count: EventCount,
     /// Units lost to stockouts.
     pub lost_units: StockQuantity,
 }
@@ -79,7 +104,7 @@ pub struct AcceptedRestockOrder {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RejectedRestockProposal {
     /// Proposed SKU text.
-    pub sku: crate::domain::retail::Sku,
+    pub sku: Sku,
     /// Proposed quantity.
     pub quantity: StockQuantity,
     /// Rejection reason.
@@ -90,7 +115,7 @@ pub struct RejectedRestockProposal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionResult {
     /// Decision run identifier.
-    pub decision_run_id: crate::domain::retail::DecisionRunId,
+    pub decision_run_id: DecisionRunId,
     /// Accepted restock orders.
     pub accepted_orders: Vec<AcceptedRestockOrder>,
     /// Rejected proposals.
@@ -105,7 +130,7 @@ pub struct WorkflowCycleResult {
     /// Number of simulated days advanced.
     pub days_advanced: u64,
     /// Number of decision runs executed.
-    pub decision_runs: StockQuantity,
+    pub decision_runs: EventCount,
     /// Final shop date.
     pub final_date: SimulationDate,
 }

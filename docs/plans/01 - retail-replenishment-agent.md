@@ -426,7 +426,8 @@ CLI tests:
 
 ## Phase 8: Tutorial And Repository Cleanup
 
-- Rewrite `docs/rigagent-tutorial.md` around the autonomous workflow demo.
+- Move the tutorial to root `README.md` and rewrite it around the autonomous
+  workflow demo.
 - Remove references to support docs, RAG, order status lookup, and REPL usage.
 - Replace examples with:
   - `cargo run -- seed --reset`

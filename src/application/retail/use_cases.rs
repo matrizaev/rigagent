@@ -1,7 +1,5 @@
 //! Retail application use cases.
 
-use std::marker::PhantomData;
-
 use crate::domain::retail::{
     DecisionRun, DecisionRunDetails, DemandSimulator, DomainError, InventoryPosition, Product,
     RestockOption, RestockOptionRequest, RestockOptionScorer, RestockOrder, RestockOrderDetails,
@@ -9,23 +7,23 @@ use crate::domain::retail::{
 };
 
 use super::{
-    AcceptedRestockOrder, AdvanceSimulation, AdvanceSimulationResult, ApplicationError,
-    DecisionAgentRequest, DecisionResult, IdGenerator, ProposedRestockOrder,
+    AcceptedRestockOrder, AdvanceSimulation, AdvanceSimulationResult, ApplicationError, Clock,
+    DecisionAgentRequest, DecisionResult, EventCount, IdGenerator, ProposedRestockOrder,
     RejectedRestockProposal, ReplenishmentDecisionAgent, RetailSnapshot, RetailStore,
     RunRestockDecision, RunWorkflowCycle, SeedRetailScenario, WorkflowCycleResult,
 };
 
 /// Retail workflow application service.
 #[derive(Debug)]
-pub struct RetailWorkflow<Store, Runs, Agent, Ids, Clock> {
+pub struct RetailWorkflow<Store, Runs, Agent, Ids, Dates> {
     store: Store,
     decision_runs: Runs,
     decision_agent: Agent,
     id_generator: Ids,
-    clock: PhantomData<Clock>,
+    clock: Dates,
 }
 
-impl<Store, Runs, Agent, Ids, Clock> RetailWorkflow<Store, Runs, Agent, Ids, Clock> {
+impl<Store, Runs, Agent, Ids, Dates> RetailWorkflow<Store, Runs, Agent, Ids, Dates> {
     /// Create a retail workflow service from its adapters.
     #[must_use]
     pub const fn new(
@@ -33,13 +31,14 @@ impl<Store, Runs, Agent, Ids, Clock> RetailWorkflow<Store, Runs, Agent, Ids, Clo
         decision_runs: Runs,
         decision_agent: Agent,
         id_generator: Ids,
+        clock: Dates,
     ) -> Self {
         Self {
             store,
             decision_runs,
             decision_agent,
             id_generator,
-            clock: PhantomData,
+            clock,
         }
     }
 
@@ -56,12 +55,13 @@ impl<Store, Runs, Agent, Ids, Clock> RetailWorkflow<Store, Runs, Agent, Ids, Clo
     }
 }
 
-impl<Store, Runs, Agent, Ids, Clock> RetailWorkflow<Store, Runs, Agent, Ids, Clock>
+impl<Store, Runs, Agent, Ids, Dates> RetailWorkflow<Store, Runs, Agent, Ids, Dates>
 where
     Store: RetailStore,
     Runs: super::DecisionRunStore,
     Agent: ReplenishmentDecisionAgent,
     Ids: IdGenerator,
+    Dates: Clock,
 {
     /// Seed durable retail state.
     ///
@@ -101,14 +101,20 @@ where
 
         let mut current_date = self.store.load_snapshot()?.current_date;
         let mut days_advanced = 0_u64;
-        let mut received_count = StockQuantity::new(0);
-        let mut sales_count = StockQuantity::new(0);
+        let mut received_count = EventCount::new(0);
+        let mut sales_count = EventCount::new(0);
         let mut lost_units = StockQuantity::new(0);
 
         while days_advanced < command.days {
             let received = self.store.receive_due_restocks(current_date)?;
             received_count = received_count
-                .checked_add(quantity_from_len(received.len(), "received restock count")?)?;
+                .checked_add(event_count_from_len(
+                    received.len(),
+                    "received restock count",
+                )?)
+                .ok_or(ApplicationError::CountOverflow {
+                    operation: "received restock count",
+                })?;
 
             let snapshot = self.store.load_snapshot()?;
             let mut updated_inventory = snapshot.inventory.clone();
@@ -120,8 +126,7 @@ where
                     product.demand_rate(),
                     inventory.demand_backlog(),
                 )?;
-                inventory.set_demand_backlog(demand.remaining_backlog);
-                let fulfilled = inventory.fulfill_demand(demand.requested_units)?;
+                let fulfilled = inventory.apply_demand_simulation(demand)?;
                 let sale = SalesOrder::record(SalesOrderDetails {
                     id: self.id_generator.sales_order_id()?,
                     sale_date: current_date,
@@ -136,7 +141,13 @@ where
             }
 
             sales_count = sales_count
-                .checked_add(quantity_from_len(sales_orders.len(), "sales order count")?)?;
+                .checked_add(event_count_from_len(
+                    sales_orders.len(),
+                    "sales order count",
+                )?)
+                .ok_or(ApplicationError::CountOverflow {
+                    operation: "sales order count",
+                })?;
             self.store
                 .record_sales_day(sales_orders, updated_inventory)?;
 
@@ -175,16 +186,17 @@ where
         }
 
         let snapshot = self.store.load_snapshot()?;
+        let decision_date = self.clock.today()?;
         let decision_run_id = self.id_generator.decision_run_id()?;
         let run = DecisionRun::start(DecisionRunDetails {
             id: decision_run_id.clone(),
-            decision_date: snapshot.current_date,
+            decision_date,
             horizon: command.horizon,
         });
         self.decision_runs.start_decision_run(run)?;
 
         let decision_result = self
-            .run_agent_and_validate(snapshot, &decision_run_id, command)
+            .run_agent_and_validate(snapshot, decision_date, &decision_run_id, command)
             .await;
 
         match decision_result {
@@ -200,6 +212,7 @@ where
     async fn run_agent_and_validate(
         &mut self,
         snapshot: RetailSnapshot,
+        decision_date: crate::domain::retail::SimulationDate,
         decision_run_id: &crate::domain::retail::DecisionRunId,
         command: RunRestockDecision,
     ) -> Result<DecisionResult, ApplicationError> {
@@ -230,6 +243,7 @@ where
                 &snapshot,
                 &projected_orders,
                 &proposal,
+                decision_date,
                 decision_run_id,
                 &mut self.id_generator,
             ) {
@@ -289,7 +303,7 @@ where
             max_restock_orders: command.max_restock_orders,
         };
         self.run_restock_decision(decision_command).await?;
-        let mut decision_runs = StockQuantity::new(1);
+        let mut decision_runs = EventCount::new(1);
 
         let mut days_advanced = 0_u64;
         while days_advanced < command.total_days {
@@ -302,7 +316,11 @@ where
                     })?;
             if checked_rem(days_advanced, command.decision_interval_days)? == 0 {
                 self.run_restock_decision(decision_command).await?;
-                decision_runs = decision_runs.checked_add(StockQuantity::new(1))?;
+                decision_runs = decision_runs.checked_add(EventCount::new(1)).ok_or(
+                    ApplicationError::CountOverflow {
+                        operation: "workflow decision count",
+                    },
+                )?;
             }
         }
 
@@ -333,18 +351,28 @@ fn ranked_options(
         let Some(option) = scored.or_else(skip_out_of_bounds_option)? else {
             continue;
         };
-        {
-            options.push(option);
-        }
+        options.push(option);
     }
 
-    options.sort_by(|left, right| {
-        right
-            .expected_profit()
-            .cents()
-            .cmp(&left.expected_profit().cents())
-    });
+    options.sort_by(compare_restock_options);
     Ok(options)
+}
+
+fn compare_restock_options(left: &RestockOption, right: &RestockOption) -> std::cmp::Ordering {
+    let left_density = u128::from(left.expected_profit().cents())
+        .saturating_mul(u128::from(right.occupied_space().units()));
+    let right_density = u128::from(right.expected_profit().cents())
+        .saturating_mul(u128::from(left.occupied_space().units()));
+
+    right_density
+        .cmp(&left_density)
+        .then_with(|| {
+            right
+                .expected_profit()
+                .cents()
+                .cmp(&left.expected_profit().cents())
+        })
+        .then_with(|| left.sku().cmp(right.sku()))
 }
 
 fn skip_out_of_bounds_option(
@@ -360,6 +388,7 @@ fn validate_proposal<Ids>(
     snapshot: &RetailSnapshot,
     projected_orders: &[RestockOrder],
     proposal: &ProposedRestockOrder,
+    decision_date: crate::domain::retail::SimulationDate,
     decision_run_id: &crate::domain::retail::DecisionRunId,
     id_generator: &mut Ids,
 ) -> Result<RestockOrder, ApplicationError>
@@ -374,7 +403,7 @@ where
 
     let product = product_for(&snapshot.products, &proposal.sku)?;
     if !product.is_active() {
-        return Err(ApplicationError::SkuNotFound {
+        return Err(ApplicationError::InactiveProduct {
             sku: proposal.sku.clone(),
         });
     }
@@ -413,8 +442,8 @@ where
         id: id_generator.restock_order_id()?,
         sku: proposal.sku.clone(),
         quantity: proposal.quantity,
-        ordered_at: snapshot.current_date,
-        eta: product.restock_eta(snapshot.current_date)?,
+        ordered_at: decision_date,
+        eta: product.restock_eta(decision_date)?,
         decision_run_id: decision_run_id.clone(),
         rationale: proposal.rationale.clone(),
     })?)
@@ -489,6 +518,14 @@ fn quantity_from_len(
     Ok(StockQuantity::new(units))
 }
 
+fn event_count_from_len(
+    len: usize,
+    operation: &'static str,
+) -> Result<EventCount, ApplicationError> {
+    let count = u64::try_from(len).map_err(|_| ApplicationError::CountOverflow { operation })?;
+    Ok(EventCount::new(count))
+}
+
 fn checked_rem(dividend: u64, divisor: u64) -> Result<u64, ApplicationError> {
     dividend
         .checked_rem(divisor)
@@ -506,7 +543,7 @@ mod tests {
 
     use super::*;
     use crate::application::retail::{
-        Clock, DecisionAgentResponse, DecisionRunStore, ProfitSummary, RetailStore,
+        DecisionAgentResponse, DecisionRunStore, ProfitSummary, RetailStore,
     };
     use crate::domain::retail::{
         ApparelKind, Brand, DecisionHorizonDays, DecisionRunId, DecisionRunStatus, DemandBacklog,
@@ -523,6 +560,14 @@ mod tests {
         inventory: Vec<InventoryPosition>,
         restocks: Vec<RestockOrder>,
         sales: Vec<SalesOrder>,
+        failures: Vec<FakeStoreFailure>,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum FakeStoreFailure {
+        LoadSnapshot,
+        RecordSalesDay,
+        PlaceRestockOrders,
     }
 
     impl FakeStore {
@@ -540,7 +585,16 @@ mod tests {
                 inventory,
                 restocks: Vec::new(),
                 sales: Vec::new(),
+                failures: Vec::new(),
             }
+        }
+
+        fn inject_failure(&mut self, failure: FakeStoreFailure) {
+            self.failures.push(failure);
+        }
+
+        fn fails(&self, failure: FakeStoreFailure) -> bool {
+            self.failures.contains(&failure)
         }
     }
 
@@ -550,6 +604,13 @@ mod tests {
         }
 
         fn load_snapshot(&self) -> Result<RetailSnapshot, ApplicationError> {
+            if self.fails(FakeStoreFailure::LoadSnapshot) {
+                return Err(ApplicationError::store_failure(
+                    "load snapshot",
+                    "invalid persisted data injected by fake store",
+                ));
+            }
+
             Ok(RetailSnapshot {
                 current_date: self.current_date,
                 capacity: self.capacity,
@@ -597,6 +658,13 @@ mod tests {
             sales_orders: Vec<SalesOrder>,
             inventory: Vec<InventoryPosition>,
         ) -> Result<(), ApplicationError> {
+            if self.fails(FakeStoreFailure::RecordSalesDay) {
+                return Err(ApplicationError::store_failure(
+                    "record sales day",
+                    "transaction failure injected by fake store",
+                ));
+            }
+
             self.sales.extend(sales_orders);
             self.inventory = inventory;
             Ok(())
@@ -606,6 +674,13 @@ mod tests {
             &mut self,
             orders: Vec<RestockOrder>,
         ) -> Result<(), ApplicationError> {
+            if self.fails(FakeStoreFailure::PlaceRestockOrders) {
+                return Err(ApplicationError::store_failure(
+                    "place restock orders",
+                    "transaction failure injected by fake store",
+                ));
+            }
+
             for order in &orders {
                 if self.restocks.iter().any(|existing| {
                     existing.status() == RestockOrderStatus::Open && existing.sku() == order.sku()
@@ -780,11 +855,13 @@ mod tests {
     }
 
     #[derive(Debug, Clone, Copy)]
-    struct FakeClock;
+    struct FakeClock {
+        today: crate::domain::retail::SimulationDate,
+    }
 
     impl Clock for FakeClock {
         fn today(&self) -> Result<crate::domain::retail::SimulationDate, ApplicationError> {
-            test_date()
+            Ok(self.today)
         }
     }
 
@@ -796,16 +873,22 @@ mod tests {
             FakeDecisionRuns::default(),
             agent,
             FakeIds::new()?,
+            FakeClock {
+                today: clock_date()?,
+            },
         ))
     }
 
     fn test_date() -> Result<crate::domain::retail::SimulationDate, ApplicationError> {
         NaiveDate::from_ymd_opt(2026, 6, 9)
             .map(crate::domain::retail::SimulationDate::new)
-            .ok_or_else(|| ApplicationError::StoreFailure {
-                operation: "test date",
-                message: "invalid test date".to_owned(),
-            })
+            .ok_or_else(|| ApplicationError::store_failure("test date", "invalid test date"))
+    }
+
+    fn clock_date() -> Result<crate::domain::retail::SimulationDate, ApplicationError> {
+        NaiveDate::from_ymd_opt(2026, 6, 10)
+            .map(crate::domain::retail::SimulationDate::new)
+            .ok_or_else(|| ApplicationError::store_failure("test clock date", "invalid test date"))
     }
 
     fn product(
@@ -827,6 +910,25 @@ mod tests {
                 min_order_quantity: StockQuantity::new(1),
                 max_order_quantity: StockQuantity::new(50),
                 active: true,
+            },
+        )?)
+    }
+
+    fn inactive_product(sku: &str) -> Result<Product, ApplicationError> {
+        Ok(Product::from_details(
+            crate::domain::retail::ProductDetails {
+                sku: Sku::new(sku)?,
+                kind: ApparelKind::Shirt,
+                brand: Brand::new("North")?,
+                size: SizeLabel::M,
+                unit_cost: MoneyCents::new(1_000),
+                unit_price: MoneyCents::new(2_500),
+                unit_space: SpaceUnits::new(1),
+                demand_rate: "1.000".parse::<DemandRatePerDay>()?,
+                lead_time: LeadTimeDays::new(1)?,
+                min_order_quantity: StockQuantity::new(1),
+                max_order_quantity: StockQuantity::new(50),
+                active: false,
             },
         )?)
     }
@@ -875,7 +977,7 @@ mod tests {
             reset: false,
         });
 
-        assert_eq!(result, Err(ApplicationError::StateAlreadyExists));
+        assert!(matches!(result, Err(ApplicationError::StateAlreadyExists)));
         Ok(())
     }
 
@@ -898,17 +1000,11 @@ mod tests {
 
         let result = workflow.advance_simulation(AdvanceSimulation { days: 1 })?;
 
-        assert_eq!(result.received_restock_count.units(), 1);
+        assert_eq!(result.received_restock_count.count(), 1);
         assert_eq!(result.lost_units.units(), 0);
-        let inventory =
-            workflow
-                .store()
-                .inventory
-                .first()
-                .ok_or_else(|| ApplicationError::StoreFailure {
-                    operation: "test inventory lookup",
-                    message: "missing inventory".to_owned(),
-                })?;
+        let inventory = workflow.store().inventory.first().ok_or_else(|| {
+            ApplicationError::store_failure("test inventory lookup", "missing inventory")
+        })?;
         assert_eq!(inventory.on_hand().units(), 4);
         Ok(())
     }
@@ -923,15 +1019,39 @@ mod tests {
 
         assert_eq!(result.lost_units.units(), 2);
         let sale =
-            workflow
-                .store()
-                .sales
-                .first()
-                .ok_or_else(|| ApplicationError::StoreFailure {
-                    operation: "test sales lookup",
-                    message: "missing sale".to_owned(),
-                })?;
+            workflow.store().sales.first().ok_or_else(|| {
+                ApplicationError::store_failure("test sales lookup", "missing sale")
+            })?;
         assert_eq!(sale.lost_units().units(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn advance_simulation_surfaces_transaction_failure() -> Result<(), ApplicationError> {
+        let product = product("shirt-1", "1.000", 1)?;
+        let mut store =
+            store_with_inventory(&product, StockQuantity::new(5), SpaceUnits::new(100))?;
+        store.inject_failure(FakeStoreFailure::RecordSalesDay);
+        let mut workflow = workflow(store, agent_with_proposals(Vec::new()))?;
+
+        let result = workflow.advance_simulation(AdvanceSimulation { days: 1 });
+
+        assert!(matches!(result, Err(ApplicationError::StoreFailure { .. })));
+        assert_eq!(workflow.store().sales.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn get_snapshot_surfaces_invalid_persisted_data() -> Result<(), ApplicationError> {
+        let product = product("shirt-1", "1.000", 1)?;
+        let mut store =
+            store_with_inventory(&product, StockQuantity::new(5), SpaceUnits::new(100))?;
+        store.inject_failure(FakeStoreFailure::LoadSnapshot);
+        let workflow = workflow(store, agent_with_proposals(Vec::new()))?;
+
+        let result = workflow.get_snapshot();
+
+        assert!(matches!(result, Err(ApplicationError::StoreFailure { .. })));
         Ok(())
     }
 
@@ -953,17 +1073,20 @@ mod tests {
         assert_eq!(result.accepted_orders.len(), 1);
         assert_eq!(workflow.store().restocks.len(), 1);
         let decision_run_id = result.decision_run_id;
-        assert_eq!(
+        let restock = workflow.store().restocks.first().ok_or_else(|| {
+            ApplicationError::store_failure("test restock lookup", "missing restock")
+        })?;
+        assert_eq!(restock.ordered_at(), clock_date()?);
+        let decision_run =
             workflow
                 .decision_runs()
                 .runs
                 .first()
                 .ok_or(ApplicationError::DecisionRunNotFound {
                     run_id: decision_run_id,
-                })?
-                .status(),
-            DecisionRunStatus::Completed
-        );
+                })?;
+        assert_eq!(decision_run.decision_date(), clock_date()?);
+        assert_eq!(decision_run.status(), DecisionRunStatus::Completed);
         Ok(())
     }
 
@@ -989,15 +1112,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_decision_rejects_inactive_product_proposal() -> Result<(), ApplicationError> {
+        let product = inactive_product("shirt-1")?;
+        let store = store_with_inventory(&product, StockQuantity::new(0), SpaceUnits::new(100))?;
+        let mut workflow = workflow(
+            store,
+            agent_with_proposals(vec![ProposedRestockOrder {
+                sku: product.sku().clone(),
+                quantity: StockQuantity::new(2),
+                rationale: "inactive".to_owned(),
+            }]),
+        )?;
+
+        let result = workflow.run_restock_decision(decision_command()?).await?;
+
+        assert_eq!(result.accepted_orders.len(), 0);
+        assert_eq!(result.rejected_proposals.len(), 1);
+        assert!(
+            result
+                .rejected_proposals
+                .first()
+                .is_some_and(|proposal| proposal.reason.contains("inactive"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_decision_marks_run_failed_on_restock_transaction_failure()
+    -> Result<(), ApplicationError> {
+        let product = product("shirt-1", "1.000", 1)?;
+        let mut store =
+            store_with_inventory(&product, StockQuantity::new(0), SpaceUnits::new(100))?;
+        store.inject_failure(FakeStoreFailure::PlaceRestockOrders);
+        let mut workflow = workflow(
+            store,
+            agent_with_proposals(vec![ProposedRestockOrder {
+                sku: product.sku().clone(),
+                quantity: StockQuantity::new(5),
+                rationale: "profitable".to_owned(),
+            }]),
+        )?;
+
+        let result = workflow.run_restock_decision(decision_command()?).await;
+
+        assert!(matches!(result, Err(ApplicationError::StoreFailure { .. })));
+        assert_eq!(
+            workflow
+                .decision_runs()
+                .runs
+                .first()
+                .ok_or(ApplicationError::DecisionRunNotFound {
+                    run_id: DecisionRunId::new("decision-1")?,
+                })?
+                .status(),
+            DecisionRunStatus::Failed
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn run_decision_marks_run_failed_on_agent_error() -> Result<(), ApplicationError> {
         let product = product("shirt-1", "1.000", 1)?;
         let store = store_with_inventory(&product, StockQuantity::new(0), SpaceUnits::new(100))?;
         let mut workflow = workflow(
             store,
             FakeAgent {
-                response: Err(ApplicationError::AgentFailure {
-                    message: "model unavailable".to_owned(),
-                }),
+                response: Err(ApplicationError::agent_failure_message("model unavailable")),
             },
         )?;
 
@@ -1033,8 +1213,42 @@ mod tests {
             })
             .await?;
 
-        assert_eq!(result.decision_runs.units(), 2);
+        assert_eq!(result.decision_runs.count(), 2);
         assert_eq!(workflow.decision_runs().runs.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn ranked_options_prefer_profit_per_occupied_space() -> Result<(), ApplicationError> {
+        let bulky = product("bulky-1", "1.000", 10)?;
+        let compact = product("compact-1", "0.500", 1)?;
+        let snapshot = RetailSnapshot {
+            current_date: test_date()?,
+            capacity: SpaceUnits::new(100),
+            products: vec![bulky.clone(), compact.clone()],
+            inventory: vec![
+                InventoryPosition::new(
+                    bulky.sku().clone(),
+                    StockQuantity::new(0),
+                    DemandBacklog::ZERO,
+                ),
+                InventoryPosition::new(
+                    compact.sku().clone(),
+                    StockQuantity::new(0),
+                    DemandBacklog::ZERO,
+                ),
+            ],
+            open_restocks: Vec::new(),
+            recent_sales: Vec::new(),
+            profit_summary: ProfitSummary::zero(),
+        };
+
+        let options = ranked_options(&snapshot, DecisionHorizonDays::new(14)?)?;
+        let first = options.first().ok_or_else(|| {
+            ApplicationError::store_failure("test ranked option lookup", "missing ranked option")
+        })?;
+
+        assert_eq!(first.sku(), compact.sku());
         Ok(())
     }
 }

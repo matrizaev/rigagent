@@ -74,7 +74,7 @@ impl Product {
         if details.max_order_quantity < details.min_order_quantity {
             return Err(DomainError::RestockQuantityOutOfBounds {
                 sku: details.sku,
-                requested: details.max_order_quantity,
+                requested: details.min_order_quantity,
                 minimum: details.min_order_quantity,
                 maximum: details.max_order_quantity,
             });
@@ -251,9 +251,17 @@ impl InventoryPosition {
         self.demand_backlog
     }
 
-    /// Replace carried demand backlog.
-    pub const fn set_demand_backlog(&mut self, demand_backlog: super::DemandBacklog) {
-        self.demand_backlog = demand_backlog;
+    /// Apply one deterministic demand simulation and return fulfilled units.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on arithmetic overflow.
+    pub fn apply_demand_simulation(
+        &mut self,
+        simulation: super::DemandSimulation,
+    ) -> Result<StockQuantity, DomainError> {
+        self.demand_backlog = simulation.remaining_backlog;
+        self.fulfill_demand(simulation.requested_units)
     }
 
     /// Receive a supplier restock.

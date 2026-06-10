@@ -4,8 +4,8 @@ use std::future::Future;
 use std::path::Path;
 
 use crate::domain::retail::{
-    DecisionRun, DecisionRunId, RestockOption, RestockOrder, RestockOrderId, SalesOrder,
-    SalesOrderId, SimulationDate, Sku, StockQuantity,
+    DecisionRun, DecisionRunId, InventoryPosition, RestockOption, RestockOrder, RestockOrderId,
+    SalesOrder, SalesOrderId, SimulationDate, Sku, StockQuantity,
 };
 
 use super::{ApplicationError, ProfitSummary, RetailSnapshot};
@@ -51,7 +51,7 @@ pub trait RetailStore {
     fn record_sales_day(
         &mut self,
         sales_orders: Vec<SalesOrder>,
-        inventory: Vec<crate::domain::retail::InventoryPosition>,
+        inventory: Vec<InventoryPosition>,
     ) -> Result<(), ApplicationError>;
 
     /// Place accepted restock orders.
@@ -165,7 +165,7 @@ pub trait ReplenishmentDecisionAgent {
     ) -> impl Future<Output = Result<DecisionAgentResponse, ApplicationError>>;
 }
 
-/// Date supplier for application behavior that needs real time.
+/// Date supplier for use cases that need the current calendar date.
 pub trait Clock {
     /// Return today's date.
     ///

@@ -1,5 +1,8 @@
 //! External adapters for the retail workflow.
 
+/// Clock adapters.
+pub mod clock;
+
 /// Decision-agent adapters.
 pub mod agents;
 

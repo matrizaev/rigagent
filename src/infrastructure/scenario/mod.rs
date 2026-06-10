@@ -198,9 +198,15 @@ impl TryFrom<&ProductDto> for Product {
     fn try_from(product: &ProductDto) -> Result<Self, Self::Error> {
         Self::from_details(ProductDetails {
             sku: Sku::new(product.sku.clone()).map_domain("products.sku")?,
-            kind: apparel_kind(&product.item_type)?,
+            kind: product
+                .item_type
+                .parse::<ApparelKind>()
+                .map_domain("products.item_type")?,
             brand: Brand::new(product.brand.clone()).map_domain("products.brand")?,
-            size: size_label(&product.size)?,
+            size: product
+                .size
+                .parse::<SizeLabel>()
+                .map_domain("products.size")?,
             unit_cost: MoneyCents::new(non_negative_u64(
                 product.unit_cost_cents,
                 "products.unit_cost_cents",
@@ -264,36 +270,6 @@ fn non_negative_u64(value: i64, field: &'static str) -> Result<u64, ScenarioErro
         },
         Ok,
     )
-}
-
-fn apparel_kind(value: &str) -> Result<ApparelKind, ScenarioError> {
-    match value {
-        "shirt" => Ok(ApparelKind::Shirt),
-        "pants" => Ok(ApparelKind::Pants),
-        "jacket" => Ok(ApparelKind::Jacket),
-        "dress" => Ok(ApparelKind::Dress),
-        "shoes" => Ok(ApparelKind::Shoes),
-        "accessory" => Ok(ApparelKind::Accessory),
-        _ => Err(ScenarioError::InvalidValue {
-            field: "products.item_type",
-            message: format!("unsupported apparel kind {value}"),
-        }),
-    }
-}
-
-fn size_label(value: &str) -> Result<SizeLabel, ScenarioError> {
-    match value {
-        "XS" => Ok(SizeLabel::Xs),
-        "S" => Ok(SizeLabel::S),
-        "M" => Ok(SizeLabel::M),
-        "L" => Ok(SizeLabel::L),
-        "XL" => Ok(SizeLabel::Xl),
-        "XXL" => Ok(SizeLabel::Xxl),
-        numeric => match numeric.parse::<u16>() {
-            Ok(size) => Ok(SizeLabel::Numeric(size)),
-            Err(error) => Err(invalid_value("products.size", error)),
-        },
-    }
 }
 
 fn invalid_value(field: &'static str, error: impl std::error::Error) -> ScenarioError {

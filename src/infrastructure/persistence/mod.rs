@@ -2,7 +2,10 @@
 
 mod schema;
 
+use std::error::Error as StdError;
+use std::fmt::{self, Display, Formatter};
 use std::path::Path;
+use std::sync::Arc;
 
 use chrono::NaiveDate;
 use diesel::prelude::*;
@@ -12,7 +15,7 @@ use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use thiserror::Error;
 
 use crate::application::retail::{
-    ApplicationError, DecisionRunStore, ProfitSummary, RetailSnapshot, RetailStore,
+    ApplicationError, DecisionRunStore, ProfitSummary, RetailSnapshot, RetailStore, SharedError,
 };
 use crate::domain::retail::{
     ApparelKind, Brand, DecisionHorizonDays, DecisionRun, DecisionRunDetails, DecisionRunId,
@@ -31,46 +34,98 @@ pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 type SqlitePool = Pool<ConnectionManager<SqliteConnection>>;
 type SqlitePooledConnection = PooledConnection<ConnectionManager<SqliteConnection>>;
 
+/// Shared source error stored by persistence errors.
+#[derive(Debug, Clone)]
+pub struct ErrorSource {
+    source: Arc<dyn StdError + Send + Sync + 'static>,
+}
+
+impl ErrorSource {
+    fn new(source: impl StdError + Send + Sync + 'static) -> Self {
+        Self {
+            source: Arc::new(source),
+        }
+    }
+
+    fn message(message: impl Into<String>) -> Self {
+        Self::new(MessageError(message.into()))
+    }
+
+    fn boxed(source: Box<dyn StdError + Send + Sync + 'static>) -> Self {
+        Self {
+            source: Arc::from(source),
+        }
+    }
+}
+
+impl Display for ErrorSource {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        Display::fmt(&self.source, formatter)
+    }
+}
+
+impl StdError for ErrorSource {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+#[derive(Debug, Error, Clone)]
+#[error("{0}")]
+struct MessageError(String);
+
 /// Persistence adapter errors.
 #[derive(Debug, Error)]
 pub enum InfrastructureError {
     /// A row was not found.
-    #[error("{entity} was not found")]
+    #[error("{entity} was not found: {source}")]
     NotFound {
         /// Missing entity.
         entity: &'static str,
+        /// Source failure.
+        #[source]
+        source: ErrorSource,
     },
     /// A unique constraint failed.
-    #[error("unique constraint failed during {operation}")]
+    #[error("unique constraint failed during {operation}: {source}")]
     UniqueViolation {
         /// Failed operation.
         operation: &'static str,
+        /// Source failure.
+        #[source]
+        source: ErrorSource,
     },
     /// A foreign-key constraint failed.
-    #[error("foreign-key constraint failed during {operation}")]
+    #[error("foreign-key constraint failed during {operation}: {source}")]
     ForeignKeyViolation {
         /// Failed operation.
         operation: &'static str,
+        /// Source failure.
+        #[source]
+        source: ErrorSource,
     },
     /// Embedded migrations failed.
-    #[error("migration failed: {message}")]
+    #[error("migration failed: {source}")]
     MigrationFailed {
-        /// Migration failure detail.
-        message: String,
+        /// Source failure.
+        #[source]
+        source: ErrorSource,
     },
     /// The `SQLite` connection pool failed.
-    #[error("connection pool failed: {message}")]
+    #[error("connection pool failed: {source}")]
     PoolFailed {
-        /// Pool failure detail.
-        message: String,
+        /// Source failure.
+        #[source]
+        source: ErrorSource,
     },
     /// Diesel failed to serialize or deserialize persisted data.
-    #[error("serialization failed during {operation}: {message}")]
+    #[error("serialization failed during {operation}: {source}")]
     SerializationFailed {
         /// Failed operation.
         operation: &'static str,
-        /// Failure detail.
-        message: String,
+        /// Source failure.
+        #[source]
+        source: ErrorSource,
     },
     /// Persisted data violates domain invariants.
     #[error("invalid persisted data in {entity}: {source}")]
@@ -85,23 +140,30 @@ pub enum InfrastructureError {
 
 impl InfrastructureError {
     fn diesel(operation: &'static str, error: diesel::result::Error) -> Self {
-        match error {
-            diesel::result::Error::NotFound => Self::NotFound { entity: operation },
+        match &error {
+            diesel::result::Error::NotFound => Self::NotFound {
+                entity: operation,
+                source: ErrorSource::new(error),
+            },
             diesel::result::Error::DatabaseError(kind, _) => match kind {
-                diesel::result::DatabaseErrorKind::UniqueViolation => {
-                    Self::UniqueViolation { operation }
-                }
+                diesel::result::DatabaseErrorKind::UniqueViolation => Self::UniqueViolation {
+                    operation,
+                    source: ErrorSource::new(error),
+                },
                 diesel::result::DatabaseErrorKind::ForeignKeyViolation => {
-                    Self::ForeignKeyViolation { operation }
+                    Self::ForeignKeyViolation {
+                        operation,
+                        source: ErrorSource::new(error),
+                    }
                 }
                 _ => Self::SerializationFailed {
                     operation,
-                    message: "database error".to_owned(),
+                    source: ErrorSource::new(error),
                 },
             },
-            other => Self::SerializationFailed {
+            _ => Self::SerializationFailed {
                 operation,
-                message: other.to_string(),
+                source: ErrorSource::new(error),
             },
         }
     }
@@ -117,7 +179,7 @@ impl From<InfrastructureError> for ApplicationError {
     fn from(error: InfrastructureError) -> Self {
         Self::StoreFailure {
             operation: "diesel persistence",
-            message: error.to_string(),
+            source: SharedError::new(error),
         }
     }
 }
@@ -126,7 +188,7 @@ impl From<ScenarioError> for ApplicationError {
     fn from(error: ScenarioError) -> Self {
         Self::StoreFailure {
             operation: "load scenario",
-            message: error.to_string(),
+            source: SharedError::new(error),
         }
     }
 }
@@ -157,17 +219,6 @@ pub struct DieselDecisionRunStore {
 }
 
 impl DieselRetailStore {
-    /// Create a store and run embedded migrations.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when pool creation or migration execution fails.
-    pub fn connect(database_url: impl Into<String>) -> Result<Self, InfrastructureError> {
-        let pool = create_pool(database_url)?;
-        run_migrations(&pool)?;
-        Ok(Self { pool })
-    }
-
     /// Create a store from an existing pool.
     #[must_use]
     pub const fn from_pool(pool: SqlitePool) -> Self {
@@ -221,7 +272,7 @@ impl DieselRetailStore {
             .pool
             .get()
             .map_err(|error| InfrastructureError::PoolFailed {
-                message: error.to_string(),
+                source: ErrorSource::new(error),
             })?;
         diesel::sql_query("PRAGMA foreign_keys = ON")
             .execute(&mut connection)
@@ -231,17 +282,6 @@ impl DieselRetailStore {
 }
 
 impl DieselDecisionRunStore {
-    /// Create a decision-run store and run embedded migrations.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when pool creation or migration execution fails.
-    pub fn connect(database_url: impl Into<String>) -> Result<Self, InfrastructureError> {
-        let pool = create_pool(database_url)?;
-        run_migrations(&pool)?;
-        Ok(Self { pool })
-    }
-
     /// Create a decision-run store from an existing pool.
     #[must_use]
     pub const fn from_pool(pool: SqlitePool) -> Self {
@@ -253,7 +293,7 @@ impl DieselDecisionRunStore {
             .pool
             .get()
             .map_err(|error| InfrastructureError::PoolFailed {
-                message: error.to_string(),
+                source: ErrorSource::new(error),
             })?;
         diesel::sql_query("PRAGMA foreign_keys = ON")
             .execute(&mut connection)
@@ -272,7 +312,7 @@ pub fn create_pool(database_url: impl Into<String>) -> Result<SqlitePool, Infras
     Pool::builder()
         .build(manager)
         .map_err(|error| InfrastructureError::PoolFailed {
-            message: error.to_string(),
+            source: ErrorSource::new(error),
         })
 }
 
@@ -285,12 +325,12 @@ pub fn run_migrations(pool: &SqlitePool) -> Result<(), InfrastructureError> {
     let mut connection = pool
         .get()
         .map_err(|error| InfrastructureError::PoolFailed {
-            message: error.to_string(),
+            source: ErrorSource::new(error),
         })?;
     connection
         .run_pending_migrations(MIGRATIONS)
         .map_err(|error| InfrastructureError::MigrationFailed {
-            message: error.to_string(),
+            source: ErrorSource::boxed(error),
         })?;
     Ok(())
 }
@@ -315,7 +355,7 @@ impl RetailStore for DieselRetailStore {
         if shop.id != 1 {
             return Err(InfrastructureError::SerializationFailed {
                 operation: "shop_state.id",
-                message: "shop state row must use id 1".to_owned(),
+                source: ErrorSource::message("shop state row must use id 1"),
             }
             .into());
         }
@@ -650,9 +690,9 @@ impl TryFrom<&Product> for ProductInsert {
     fn try_from(product: &Product) -> Result<Self, Self::Error> {
         Ok(Self {
             sku: product.sku().as_str().to_owned(),
-            item_type: apparel_kind_to_string(product.kind()),
+            item_type: product.kind().to_string(),
             brand: product.brand().as_str().to_owned(),
-            size: size_to_string(product.size()),
+            size: product.size().to_string(),
             unit_cost_cents: i64_from_u64(product.unit_cost().cents(), "products.unit_cost_cents")?,
             unit_price_cents: i64_from_u64(
                 product.unit_price().cents(),
@@ -686,9 +726,12 @@ impl TryFrom<&ProductRow> for Product {
     fn try_from(row: &ProductRow) -> Result<Self, Self::Error> {
         Self::from_details(ProductDetails {
             sku: Sku::new(row.sku.clone()).map_invalid("products")?,
-            kind: apparel_kind_from_string(&row.item_type)?,
+            kind: row
+                .item_type
+                .parse::<ApparelKind>()
+                .map_invalid("products")?,
             brand: Brand::new(row.brand.clone()).map_invalid("products")?,
-            size: size_from_string(&row.size)?,
+            size: row.size.parse::<SizeLabel>().map_invalid("products")?,
             unit_cost: MoneyCents::new(u64_from_i64(
                 row.unit_cost_cents,
                 "products.unit_cost_cents",
@@ -950,7 +993,7 @@ impl TryFrom<&DecisionRunRow> for DecisionRun {
                     row.summary.clone().ok_or_else(|| {
                         InfrastructureError::SerializationFailed {
                             operation: "decision_runs.summary",
-                            message: "completed run has no summary".to_owned(),
+                            source: ErrorSource::message("completed run has no summary"),
                         }
                     })?,
                     StockQuantity::new(u64_from_i64(
@@ -963,7 +1006,7 @@ impl TryFrom<&DecisionRunRow> for DecisionRun {
                 .fail(row.summary.clone().ok_or_else(|| {
                     InfrastructureError::SerializationFailed {
                         operation: "decision_runs.summary",
-                        message: "failed run has no summary".to_owned(),
+                        source: ErrorSource::message("failed run has no summary"),
                     }
                 })?)
                 .map_invalid("decision_runs")?,
@@ -991,48 +1034,62 @@ fn load_sales(
         .load::<SalesOrderRow>(connection)
         .map_err(|error| InfrastructureError::diesel("sales orders", error))?
         .iter()
-        .map(|row| sale_from_row(row, product_values))
+        .map(|row| {
+            SalesOrder::try_from(PersistedSalesOrder {
+                row,
+                product_values,
+            })
+        })
         .collect()
 }
 
-fn sale_from_row(
-    row: &SalesOrderRow,
-    product_values: &[Product],
-) -> Result<SalesOrder, InfrastructureError> {
-    let product = product_values
-        .iter()
-        .find(|candidate| candidate.sku().as_str() == row.sku)
-        .ok_or(InfrastructureError::NotFound {
-            entity: "sales_orders.product",
-        })?;
-    let sale = SalesOrder::record(SalesOrderDetails {
-        id: SalesOrderId::new(row.id.clone()).map_invalid("sales_orders")?,
-        sale_date: parse_date(&row.sale_date, "sales_orders.sale_date")?,
-        sku: Sku::new(row.sku.clone()).map_invalid("sales_orders")?,
-        requested: StockQuantity::new(u64_from_i64(
-            row.quantity_requested,
-            "sales_orders.quantity_requested",
-        )?),
-        fulfilled: StockQuantity::new(u64_from_i64(
-            row.quantity_fulfilled,
-            "sales_orders.quantity_fulfilled",
-        )?),
-        unit_price: product.unit_price(),
-        unit_cost: product.unit_cost(),
-    })
-    .map_invalid("sales_orders")?;
+struct PersistedSalesOrder<'a> {
+    row: &'a SalesOrderRow,
+    product_values: &'a [Product],
+}
 
-    if sale.revenue().cents() != u64_from_i64(row.revenue_cents, "sales_orders.revenue_cents")?
-        || sale.cost().cents() != u64_from_i64(row.cost_cents, "sales_orders.cost_cents")?
-        || sale.lost_units().units() != u64_from_i64(row.lost_units, "sales_orders.lost_units")?
-    {
-        return Err(InfrastructureError::SerializationFailed {
-            operation: "sales_orders totals",
-            message: "persisted totals do not match product economics".to_owned(),
-        });
+impl TryFrom<PersistedSalesOrder<'_>> for SalesOrder {
+    type Error = InfrastructureError;
+
+    fn try_from(persisted: PersistedSalesOrder<'_>) -> Result<Self, Self::Error> {
+        let row = persisted.row;
+        let product = persisted
+            .product_values
+            .iter()
+            .find(|candidate| candidate.sku().as_str() == row.sku)
+            .ok_or(InfrastructureError::NotFound {
+                entity: "sales_orders.product",
+                source: ErrorSource::message("sales order references an unknown product"),
+            })?;
+        let sale = Self::record(SalesOrderDetails {
+            id: SalesOrderId::new(row.id.clone()).map_invalid("sales_orders")?,
+            sale_date: parse_date(&row.sale_date, "sales_orders.sale_date")?,
+            sku: Sku::new(row.sku.clone()).map_invalid("sales_orders")?,
+            requested: StockQuantity::new(u64_from_i64(
+                row.quantity_requested,
+                "sales_orders.quantity_requested",
+            )?),
+            fulfilled: StockQuantity::new(u64_from_i64(
+                row.quantity_fulfilled,
+                "sales_orders.quantity_fulfilled",
+            )?),
+            unit_price: product.unit_price(),
+            unit_cost: product.unit_cost(),
+        })
+        .map_invalid("sales_orders")?;
+
+        if sale.revenue().cents() != u64_from_i64(row.revenue_cents, "sales_orders.revenue_cents")?
+            || sale.cost().cents() != u64_from_i64(row.cost_cents, "sales_orders.cost_cents")?
+            || sale.lost_units().units() != u64_from_i64(row.lost_units, "sales_orders.lost_units")?
+        {
+            return Err(InfrastructureError::SerializationFailed {
+                operation: "sales_orders totals",
+                source: ErrorSource::message("persisted totals do not match product economics"),
+            });
+        }
+
+        Ok(sale)
     }
-
-    Ok(sale)
 }
 
 fn profit_summary_from_sales(sales: &[SalesOrder]) -> Result<ProfitSummary, InfrastructureError> {
@@ -1061,7 +1118,7 @@ fn parse_date(value: &str, operation: &'static str) -> Result<SimulationDate, In
         .map(SimulationDate::new)
         .map_err(|error| InfrastructureError::SerializationFailed {
             operation,
-            message: error.to_string(),
+            source: ErrorSource::new(error),
         })
 }
 
@@ -1072,72 +1129,15 @@ fn date_to_string(date: SimulationDate) -> String {
 fn i64_from_u64(value: u64, operation: &'static str) -> Result<i64, InfrastructureError> {
     i64::try_from(value).map_err(|_| InfrastructureError::SerializationFailed {
         operation,
-        message: "value does not fit in SQLite integer".to_owned(),
+        source: ErrorSource::message("value does not fit in SQLite integer"),
     })
 }
 
 fn u64_from_i64(value: i64, operation: &'static str) -> Result<u64, InfrastructureError> {
     u64::try_from(value).map_err(|_| InfrastructureError::SerializationFailed {
         operation,
-        message: "negative persisted integer".to_owned(),
+        source: ErrorSource::message("negative persisted integer"),
     })
-}
-
-fn apparel_kind_to_string(kind: ApparelKind) -> String {
-    match kind {
-        ApparelKind::Shirt => "shirt",
-        ApparelKind::Pants => "pants",
-        ApparelKind::Jacket => "jacket",
-        ApparelKind::Dress => "dress",
-        ApparelKind::Shoes => "shoes",
-        ApparelKind::Accessory => "accessory",
-    }
-    .to_owned()
-}
-
-fn apparel_kind_from_string(value: &str) -> Result<ApparelKind, InfrastructureError> {
-    match value {
-        "shirt" => Ok(ApparelKind::Shirt),
-        "pants" => Ok(ApparelKind::Pants),
-        "jacket" => Ok(ApparelKind::Jacket),
-        "dress" => Ok(ApparelKind::Dress),
-        "shoes" => Ok(ApparelKind::Shoes),
-        "accessory" => Ok(ApparelKind::Accessory),
-        _ => Err(InfrastructureError::SerializationFailed {
-            operation: "products.item_type",
-            message: "unknown apparel kind".to_owned(),
-        }),
-    }
-}
-
-fn size_to_string(size: SizeLabel) -> String {
-    match size {
-        SizeLabel::Xs => "XS".to_owned(),
-        SizeLabel::S => "S".to_owned(),
-        SizeLabel::M => "M".to_owned(),
-        SizeLabel::L => "L".to_owned(),
-        SizeLabel::Xl => "XL".to_owned(),
-        SizeLabel::Xxl => "XXL".to_owned(),
-        SizeLabel::Numeric(value) => value.to_string(),
-    }
-}
-
-fn size_from_string(value: &str) -> Result<SizeLabel, InfrastructureError> {
-    match value {
-        "XS" => Ok(SizeLabel::Xs),
-        "S" => Ok(SizeLabel::S),
-        "M" => Ok(SizeLabel::M),
-        "L" => Ok(SizeLabel::L),
-        "XL" => Ok(SizeLabel::Xl),
-        "XXL" => Ok(SizeLabel::Xxl),
-        other => other
-            .parse::<u16>()
-            .map(SizeLabel::Numeric)
-            .map_err(|error| InfrastructureError::SerializationFailed {
-                operation: "products.size",
-                message: error.to_string(),
-            }),
-    }
 }
 
 fn restock_status_to_string(status: RestockOrderStatus) -> String {
@@ -1156,7 +1156,7 @@ fn restock_status_from_string(value: &str) -> Result<RestockOrderStatus, Infrast
         "cancelled" => Ok(RestockOrderStatus::Cancelled),
         _ => Err(InfrastructureError::SerializationFailed {
             operation: "restock_orders.status",
-            message: "unknown restock status".to_owned(),
+            source: ErrorSource::message("unknown restock status"),
         }),
     }
 }
@@ -1177,7 +1177,7 @@ fn decision_status_from_string(value: &str) -> Result<DecisionRunStatus, Infrast
         "failed" => Ok(DecisionRunStatus::Failed),
         _ => Err(InfrastructureError::SerializationFailed {
             operation: "decision_runs.status",
-            message: "unknown decision status".to_owned(),
+            source: ErrorSource::message("unknown decision status"),
         }),
     }
 }
@@ -1230,8 +1230,10 @@ mod tests {
     }
 
     fn stores() -> Result<(DieselRetailStore, DieselDecisionRunStore), InfrastructureError> {
-        let store = DieselRetailStore::connect(database_url())?;
-        let runs = DieselDecisionRunStore::from_pool(store.pool());
+        let pool = create_pool(database_url())?;
+        run_migrations(&pool)?;
+        let store = DieselRetailStore::from_pool(pool.clone());
+        let runs = DieselDecisionRunStore::from_pool(pool);
         Ok((store, runs))
     }
 
@@ -1308,6 +1310,18 @@ mod tests {
     }
 
     #[test]
+    fn advances_shop_date() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut store, _) = stores()?;
+        store.seed_state(&seed_state()?, true)?;
+        let next_date = test_date()?.checked_add_days(2)?;
+
+        store.advance_shop_date(next_date)?;
+
+        assert_eq!(store.load_snapshot()?.current_date, next_date);
+        Ok(())
+    }
+
+    #[test]
     fn receives_due_restock_and_updates_inventory() -> Result<(), Box<dyn std::error::Error>> {
         let (mut store, mut runs) = stores()?;
         store.seed_state(&seed_state()?, true)?;
@@ -1369,7 +1383,18 @@ mod tests {
         let result = store
             .place_restock_orders(vec![restock_order(&missing_run_id, StockQuantity::new(5))?]);
 
-        assert!(result.is_err());
+        let source = match result {
+            Err(ApplicationError::StoreFailure { source, .. }) => source,
+            other => return Err(format!("expected store failure, got {other:?}").into()),
+        };
+        let infrastructure = std::error::Error::source(&source)
+            .and_then(|source| source.downcast_ref::<InfrastructureError>())
+            .ok_or("expected infrastructure error source")?;
+
+        assert!(matches!(
+            infrastructure,
+            InfrastructureError::ForeignKeyViolation { .. }
+        ));
         Ok(())
     }
 
