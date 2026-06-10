@@ -9,7 +9,6 @@ The workflow is now runnable from the CLI:
 ```bash
 cargo run
 cargo run -- seed --reset
-cargo run -- status
 cargo run -- simulate --days 7
 cargo run -- decide --horizon-days 14
 cargo run -- run-cycle --days 30 --decision-interval-days 7
@@ -125,16 +124,19 @@ the `IdGenerator` port for:
 `src/interfaces/cli.rs` now maps Clap parser structs into application commands:
 
 - `SeedArgs -> SeedRetailScenario`
-- `status -> RetailWorkflow::get_snapshot`
 - `SimulateArgs -> AdvanceSimulation`
 - `DecideArgs -> RunRestockDecision`
 - `RunCycleArgs -> RunWorkflowCycle`
 
 It also writes user-facing command summaries.
 
-### Status Command Implementation Steps
+### Final Master Step: Status Command
 
-Add a read-only `status` command after the mutating commands work:
+`master` adds one final read-only reporting command on top of this checkpoint.
+Implement it from this branch to inspect stock health, inbound orders, and
+financial results after `simulate` or `run-cycle`.
+
+Add the `status` command like this:
 
 1. Add `Status` to the `Command` enum in `src/interfaces/cli.rs`.
 2. Add `write_status_result(output, snapshot)` in `src/interfaces/cli.rs`.
@@ -153,6 +155,15 @@ Add a read-only `status` command after the mutating commands work:
    command.
 8. Add parser and renderer tests in the CLI module.
 
+After implementing it, these commands should work:
+
+```bash
+cargo run -- seed --reset
+cargo run -- status
+cargo run -- simulate --days 3
+cargo run -- status
+```
+
 This keeps status reporting at the interface/application boundary. Domain
 objects still own inventory, money, demand, and capacity invariants; the CLI
 only decides how to print them.
@@ -168,7 +179,6 @@ It is not required for:
 
 - `cargo run`
 - `seed`
-- `status`
 - `simulate`
 
 This keeps non-model workflows usable without provider configuration.
@@ -179,9 +189,6 @@ Successful command output is intentionally concise:
 
 ```text
 seeded retail state from data/retail_scenario.yaml (reset: true)
-status date 2026-06-12
-capacity: 99/240 space unit(s) used
-profit: revenue $779.78, cost $330.00, gross $449.78, lost 0 unit(s)
 advanced 3 day(s) to 2026-06-12; received 0 restock order(s), recorded 12 sale(s), lost 0 unit(s)
 decision decision-... accepted 2 order(s), rejected 0 proposal(s): ...
 advanced 14 day(s), ran 3 decision(s), final date 2026-06-23
@@ -199,12 +206,6 @@ Seed the local SQLite database:
 
 ```bash
 cargo run -- seed --reset
-```
-
-Inspect current stock, inbound orders, and profit:
-
-```bash
-cargo run -- status
 ```
 
 Advance deterministic simulation:
@@ -242,9 +243,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 cargo run
 cargo run -- seed --reset
-cargo run -- status
 cargo run -- simulate --days 3
-cargo run -- status
 ```
 
 Decision commands require provider access and are manual checks:
@@ -282,8 +281,9 @@ study how each layer is introduced:
 - `04-diesel-persistence`: migrations and SQLite adapters.
 - `05-scenario-seeding`: YAML loader and seed data.
 - `06-rig-decision-agent`: Rig/OpenAI decision adapter.
-- `07-cli-workflow`: runtime adapter assembly, status reporting, and runnable
-  commands.
+- `07-cli-workflow`: runtime adapter assembly and runnable commands.
+- `master`: finished reference implementation, including the read-only status
+  command.
 
 ## Quality Bar
 

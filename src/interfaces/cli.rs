@@ -8,14 +8,11 @@ use thiserror::Error;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use crate::application::retail::{
-    AdvanceSimulation, AdvanceSimulationResult, ApplicationError, DecisionResult, RetailSnapshot,
+    AdvanceSimulation, AdvanceSimulationResult, ApplicationError, DecisionResult,
     RunRestockDecision, RunWorkflowCycle, SeedRetailScenario, WorkflowCycleResult,
 };
 use crate::config::AppConfig;
-use crate::domain::retail::{
-    DecisionHorizonDays, DomainError, InventoryPosition, MoneyCents, Product, SpaceUnits,
-    StockQuantity,
-};
+use crate::domain::retail::{DecisionHorizonDays, DomainError, StockQuantity};
 use crate::infrastructure::persistence::InfrastructureError;
 
 /// Command-line failures.
@@ -196,171 +193,6 @@ where
     .await
 }
 
-pub(crate) async fn write_status_result<W>(
-    output: &mut W,
-    snapshot: &RetailSnapshot,
-) -> Result<(), CliError>
-where
-    W: AsyncWrite + Unpin,
-{
-    let occupied_space = occupied_space(snapshot)?;
-    let profit = snapshot.profit_summary;
-    write_line(output, format!("status date {}", snapshot.current_date)).await?;
-    write_line(
-        output,
-        format!(
-            "capacity: {}/{} space unit(s) used",
-            occupied_space.units(),
-            snapshot.capacity.units()
-        ),
-    )
-    .await?;
-    write_line(
-        output,
-        format!(
-            "profit: revenue {}, cost {}, gross {}, lost {} unit(s)",
-            format_money(profit.revenue)?,
-            format_money(profit.cost)?,
-            format_money(profit.gross_profit)?,
-            profit.lost_units.units()
-        ),
-    )
-    .await?;
-    write_line(output, "inventory:".to_owned()).await?;
-    for product in &snapshot.products {
-        let inventory = inventory_for(&snapshot.inventory, product)?;
-        let inbound = open_inbound_quantity(snapshot, product)?;
-        write_line(
-            output,
-            format!(
-                "- {} {} {} {}: on hand {}, cover {}, inbound {}, demand {}/day, backlog {}",
-                product.sku(),
-                product.brand(),
-                product.kind(),
-                product.size(),
-                inventory.on_hand().units(),
-                format_days_of_cover(inventory.on_hand(), product)?,
-                inbound.units(),
-                format_milli_units(product.demand_rate().milli_units())?,
-                format_milli_units(inventory.demand_backlog().milli_units())?
-            ),
-        )
-        .await?;
-    }
-
-    if snapshot.open_restocks.is_empty() {
-        write_line(output, "open restocks: none".to_owned()).await?;
-    } else {
-        write_line(output, "open restocks:".to_owned()).await?;
-        for order in &snapshot.open_restocks {
-            write_line(
-                output,
-                format!(
-                    "- {}: {} unit(s), ordered {}, eta {}, rationale: {}",
-                    order.sku(),
-                    order.quantity().units(),
-                    order.ordered_at(),
-                    order.eta(),
-                    order.rationale()
-                ),
-            )
-            .await?;
-        }
-    }
-
-    write_line(
-        output,
-        format!("sales orders recorded: {}", snapshot.recent_sales.len()),
-    )
-    .await
-}
-
-fn occupied_space(snapshot: &RetailSnapshot) -> Result<SpaceUnits, CliError> {
-    let mut total = SpaceUnits::new(0);
-    for product in &snapshot.products {
-        let inventory = inventory_for(&snapshot.inventory, product)?;
-        total = total.checked_add(
-            product
-                .unit_space()
-                .checked_mul_quantity(inventory.on_hand())?,
-        )?;
-    }
-    Ok(total)
-}
-
-fn inventory_for<'a>(
-    inventory: &'a [InventoryPosition],
-    product: &Product,
-) -> Result<&'a InventoryPosition, CliError> {
-    inventory
-        .iter()
-        .find(|position| position.sku() == product.sku())
-        .ok_or_else(|| {
-            CliError::Application(ApplicationError::InventoryNotFound {
-                sku: product.sku().clone(),
-            })
-        })
-}
-
-fn open_inbound_quantity(
-    snapshot: &RetailSnapshot,
-    product: &Product,
-) -> Result<StockQuantity, CliError> {
-    let mut total = StockQuantity::new(0);
-    for order in &snapshot.open_restocks {
-        if order.sku() == product.sku() {
-            total = total.checked_add(order.quantity())?;
-        }
-    }
-    Ok(total)
-}
-
-fn format_money(amount: MoneyCents) -> Result<String, CliError> {
-    let cents = amount.cents();
-    let dollars = checked_div(cents, 100, "money display dollars")?;
-    let remainder = checked_rem(cents, 100, "money display cents")?;
-    Ok(format!("${dollars}.{remainder:02}"))
-}
-
-fn format_milli_units(milli_units: u64) -> Result<String, CliError> {
-    let whole = checked_div(milli_units, 1_000, "milli-unit display whole units")?;
-    let fraction = checked_rem(milli_units, 1_000, "milli-unit display fraction")?;
-    Ok(format!("{whole}.{fraction:03}"))
-}
-
-fn format_days_of_cover(quantity: StockQuantity, product: &Product) -> Result<String, CliError> {
-    let demand = product.demand_rate().milli_units();
-    if demand == 0 {
-        return Ok("unbounded".to_owned());
-    }
-
-    let tenths = quantity
-        .units()
-        .checked_mul(10_000)
-        .ok_or_else(|| count_overflow("days of cover numerator"))?
-        .checked_div(demand)
-        .ok_or_else(|| count_overflow("days of cover division"))?;
-    let whole = checked_div(tenths, 10, "days of cover whole")?;
-    let fraction = checked_rem(tenths, 10, "days of cover fraction")?;
-    Ok(format!("{whole}.{fraction} day(s)"))
-}
-
-fn checked_div(dividend: u64, divisor: u64, operation: &'static str) -> Result<u64, CliError> {
-    dividend
-        .checked_div(divisor)
-        .ok_or_else(|| count_overflow(operation))
-}
-
-fn checked_rem(dividend: u64, divisor: u64, operation: &'static str) -> Result<u64, CliError> {
-    dividend
-        .checked_rem(divisor)
-        .ok_or_else(|| count_overflow(operation))
-}
-
-const fn count_overflow(operation: &'static str) -> CliError {
-    CliError::Application(ApplicationError::CountOverflow { operation })
-}
-
 /// Command-line arguments for the retail replenishment workflow.
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Retail replenishment workflow agent")]
@@ -384,8 +216,6 @@ impl Cli {
 pub(crate) enum Command {
     /// Seed retail state from the configured scenario.
     Seed(SeedArgs),
-    /// Show current stock, inbound, and profit health.
-    Status,
     /// Advance the deterministic retail simulation.
     Simulate(SimulateArgs),
     /// Run one restock decision.
@@ -480,17 +310,9 @@ impl RunCycleArgs {
 mod tests {
     use super::{
         Cli, CliError, Command, RunCycleArgs, SeedArgs, SimulateArgs, render_default_help,
-        required_openai_key, write_status_result,
+        required_openai_key,
     };
-    use chrono::NaiveDate;
-
-    use crate::application::retail::{ProfitSummary, RetailSnapshot};
     use crate::config::AppConfig;
-    use crate::domain::retail::{
-        ApparelKind, Brand, DemandBacklog, DemandRatePerDay, InventoryPosition, LeadTimeDays,
-        MoneyCents, Product, ProductDetails, SimulationDate, SizeLabel, Sku, SpaceUnits,
-        StockQuantity,
-    };
 
     #[tokio::test]
     async fn no_subcommand_prints_help_without_mutating_state()
@@ -564,73 +386,6 @@ mod tests {
 
         assert!(matches!(cli.command, Some(Command::RunCycle(_))));
         Ok(())
-    }
-
-    #[test]
-    fn parses_status_subcommand() -> Result<(), Box<dyn std::error::Error>> {
-        let cli = <Cli as clap::Parser>::try_parse_from(["rigagent", "status"])?;
-
-        assert!(matches!(cli.command, Some(Command::Status)));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn status_renders_stock_and_profit_health() -> Result<(), Box<dyn std::error::Error>> {
-        let sku = Sku::new("tsh-test")?;
-        let product = Product::from_details(ProductDetails {
-            sku: sku.clone(),
-            kind: ApparelKind::Shirt,
-            brand: Brand::new("Acme")?,
-            size: SizeLabel::M,
-            unit_cost: MoneyCents::new(1_000),
-            unit_price: MoneyCents::new(2_500),
-            unit_space: SpaceUnits::new(2),
-            demand_rate: DemandRatePerDay::from_milli_units(2_500),
-            lead_time: LeadTimeDays::new(3)?,
-            min_order_quantity: StockQuantity::new(1),
-            max_order_quantity: StockQuantity::new(10),
-            active: true,
-        })?;
-        let snapshot = RetailSnapshot {
-            current_date: test_date()?,
-            capacity: SpaceUnits::new(20),
-            products: vec![product],
-            inventory: vec![InventoryPosition::new(
-                sku,
-                StockQuantity::new(5),
-                DemandBacklog::from_milli_units(250)?,
-            )],
-            open_restocks: Vec::new(),
-            recent_sales: Vec::new(),
-            profit_summary: ProfitSummary {
-                revenue: MoneyCents::new(12_345),
-                cost: MoneyCents::new(5_000),
-                gross_profit: MoneyCents::new(7_345),
-                lost_units: StockQuantity::new(2),
-            },
-        };
-        let mut output = Vec::new();
-
-        write_status_result(&mut output, &snapshot).await?;
-
-        let rendered = String::from_utf8(output)?;
-        assert!(rendered.contains("status date 2026-06-09"));
-        assert!(rendered.contains("capacity: 10/20 space unit(s) used"));
-        assert!(
-            rendered.contains("profit: revenue $123.45, cost $50.00, gross $73.45, lost 2 unit(s)")
-        );
-        assert!(rendered.contains(
-            "- TSH-TEST Acme shirt M: on hand 5, cover 2.0 day(s), inbound 0, demand 2.500/day, backlog 0.250"
-        ));
-        assert!(rendered.contains("open restocks: none"));
-        assert!(rendered.contains("sales orders recorded: 0"));
-        Ok(())
-    }
-
-    fn test_date() -> Result<SimulationDate, Box<dyn std::error::Error>> {
-        let date = NaiveDate::from_ymd_opt(2026, 6, 9)
-            .ok_or_else(|| std::io::Error::other("test date must be valid"))?;
-        Ok(SimulationDate::new(date))
     }
 
     fn test_config(openai_api_key: Option<String>) -> AppConfig {
