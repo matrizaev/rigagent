@@ -80,6 +80,7 @@ pub async fn run() -> Result<(), CliError> {
     let config = AppConfig::load()?;
     match command {
         Command::Seed(args) => run_seed(args, &config, &mut stdout).await,
+        Command::Status => run_status(&config, &mut stdout).await,
         Command::Simulate(args) => run_simulate(args, &config, &mut stdout).await,
         Command::Decide(args) => run_decide(args, &config, &mut stdout).await,
         Command::RunCycle(args) => run_cycle(args, &config, &mut stdout).await,
@@ -107,6 +108,16 @@ where
     let command = args.command(config);
     workflow.seed_scenario(&command)?;
     interfaces::cli::write_seed_result(output, &command).await
+}
+
+async fn run_status<W>(config: &AppConfig, output: &mut W) -> Result<(), CliError>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let pool = migrated_pool(config)?;
+    let workflow = workflow_without_agent(pool);
+    let snapshot = workflow.get_snapshot()?;
+    interfaces::cli::write_status_result(output, &snapshot).await
 }
 
 async fn run_simulate<W>(
