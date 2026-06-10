@@ -1,21 +1,19 @@
-# rigagent tutorial: 05 scenario seeding
+# rigagent tutorial: 06 Rig decision agent
 
-This branch is the sixth checkpoint in the `rigagent` build-along tutorial. It
-starts from `tutorial/04-diesel-persistence` and adds deterministic YAML seed
-data plus an infrastructure scenario loader. `DieselRetailStore::seed_scenario`
-now loads YAML, converts DTOs into validated domain objects, and seeds SQLite
-through the persistence adapter.
+This branch is the seventh checkpoint in the `rigagent` build-along tutorial. It
+starts from `tutorial/05-scenario-seeding` and adds the Rig/OpenAI-backed
+implementation of the `ReplenishmentDecisionAgent` application port.
 
-The command-line runtime still has placeholder command dispatch. The Rig
-decision agent and CLI-to-use-case wiring are still later checkpoints.
+The command-line runtime still has placeholder command dispatch. This branch
+adds the provider adapter only; runtime construction, `OPENAI_API_KEY` checks,
+ID generation, clocks, and CLI-to-use-case wiring are the final checkpoint.
 
 ## Current State
 
-The repository now includes scenario seeding:
+The repository now includes a model-backed decision adapter:
 
 ```text
 rigagent/
-+-- config.yaml
 +-- data/
 |   +-- retail_scenario.yaml
 +-- migrations/
@@ -25,10 +23,12 @@ rigagent/
     +-- application/
     |   +-- retail/
     +-- infrastructure/
-    |   +-- mod.rs
+    |   +-- agents/
+    |   |   +-- mod.rs
+    |   |   +-- rig_replenishment/
+    |   |       +-- mod.rs
     |   +-- persistence/
     |   +-- scenario/
-    |       +-- mod.rs
     +-- interfaces/
         +-- cli.rs
 ```
@@ -36,77 +36,94 @@ rigagent/
 Dependency direction:
 
 ```text
-infrastructure::scenario -> infrastructure::persistence::SeedRetailState
-infrastructure::scenario -> domain
-infrastructure::persistence -> application -> domain
+infrastructure::agents::rig_replenishment -> application -> domain
 ```
 
-The scenario module owns YAML DTOs, file IO, and external seed-data shape.
-Domain and application APIs still do not expose YAML DTOs or Diesel rows.
+Rig and OpenAI provider types are isolated in the infrastructure adapter. Domain
+and application APIs still do not expose provider payloads or Rig tool types.
 
 ## What This Branch Adds
 
-### Seed Data
+### Rig Adapter
 
-`data/retail_scenario.yaml` defines:
+`RigReplenishmentDecisionAgent` implements:
 
-- shop start date.
-- stock-space capacity.
-- product catalog.
-- initial inventory.
-- demand rates.
-- restock lead times.
-- min and max order quantities.
-
-The bundled scenario includes four apparel products with different economics
-and space constraints so later simulation and restock scoring have useful input.
-
-Demand rates are quoted fixed-point decimal strings:
-
-```yaml
-daily_demand_rate: "2.750"
+```rust
+ReplenishmentDecisionAgent
 ```
 
-They are parsed into domain milli-units. The loader does not use float
-arithmetic.
+Constructor inputs:
 
-### Scenario Loader
+- OpenAI API key.
+- chat model name.
 
-`src/infrastructure/scenario/mod.rs` adds:
+The adapter builds the provider client only when `decide` is called. Later CLI
+wiring will ensure `seed` and `simulate` do not require `OPENAI_API_KEY`.
 
-- private YAML DTOs.
-- `ScenarioYamlLoader`.
-- `ScenarioError`.
-- checked DTO-to-domain conversion.
+### Decision Session
 
-Validation rules:
+Each decision turn uses an in-memory `DecisionSession` containing:
 
-- scenario file must be readable.
-- YAML must parse.
-- product list must not be empty.
-- dates must be valid.
-- numeric fields must be non-negative where appropriate.
-- SKUs are canonicalized through `Sku`.
-- duplicate SKUs are rejected after canonicalization.
-- demand rates are parsed through `DemandRatePerDay`.
-- product rows are validated through `Product::from_details`.
-- initial inventory is converted into `InventoryPosition`.
-- initial occupied space must fit within configured shop capacity.
+- current `RetailSnapshot`.
+- ranked deterministic `RestockOption` values.
+- open restock orders.
+- profit summary.
+- max allowed proposals.
+- proposals collected by tool calls.
 
-### Persistence Wiring
+Tools write only to this session. They do not write directly to Diesel.
 
-`DieselRetailStore::seed_scenario` now:
+### Tool Surface
 
-1. Loads `SeedRetailState` through `ScenarioYamlLoader`.
-2. Seeds SQLite through `seed_state`.
-3. Runs the write in a persistence transaction.
+The adapter exposes implementation-detail tools:
 
-Scenario failures map into `ApplicationError::StoreFailure` with source details
-preserved.
+- `get_inventory_snapshot`
+- `list_open_restock_orders`
+- `analyze_restock_options`
+- `place_restock_order`
+- `get_profit_summary`
+
+`place_restock_order` validates session-level issues such as empty rationale,
+zero quantity, duplicate session proposals, duplicate open inbound orders, and
+quantities above the ranked option recommendation.
+
+Application/domain validation still happens later in `RetailWorkflow` before
+durable writes.
+
+### Prompt Shape
+
+The decision prompt is autonomous workflow guidance, not a chat-assistant
+script. It asks the model to:
+
+- inspect inventory.
+- inspect ranked options.
+- inspect open inbound orders.
+- inspect profit summary.
+- place no more than the configured maximum restock orders.
+- include SKU, quantity, and rationale.
+- prefer high expected gross profit per occupied stock-space.
+- avoid duplicate inbound orders and capacity overflow.
+
+The prompt also avoids exposing provider prompt details in outputs.
+
+### Failure Mapping
+
+Provider setup and provider decision failures map into
+`ApplicationError::AgentFailure` with source errors preserved.
+
+### Network-Free Tests
+
+Normal tests do not call OpenAI.
+
+The adapter tests cover:
+
+- parsing `place_restock_order` arguments.
+- recording session proposals.
+- mapping completion failures without calling a provider.
 
 ## Runtime Behavior
 
-The CLI is still not wired to the application layer:
+The CLI is still not wired to application or infrastructure:
 
 ```bash
 cargo run
@@ -118,16 +135,16 @@ opened, and no state is mutated.
 Real commands still return placeholder errors:
 
 ```bash
-cargo run -- seed --reset
+cargo run -- decide --horizon-days 14
 ```
 
 Expected behavior:
 
 ```text
-seed is parsed but not implemented until a later tutorial branch
+decide is parsed but not implemented until a later tutorial branch
 ```
 
-CLI wiring belongs to `tutorial/07-cli-workflow`.
+CLI wiring is the next and final tutorial checkpoint.
 
 ## Validate This Branch
 
@@ -146,170 +163,192 @@ The test suite now covers:
 - domain invariants and deterministic services.
 - application use cases with fakes.
 - Diesel persistence against migrated SQLite databases.
-- loading valid scenario YAML.
-- duplicate SKU rejection.
-- empty product list rejection.
-- negative field rejection.
-- initial capacity validation.
-- seeding the bundled YAML through `DieselRetailStore::seed_scenario`.
+- scenario YAML loading and seed-state conversion.
+- Rig adapter session and failure behavior without network access.
 
 ## Goal For The Next Branch
 
-The next branch is `tutorial/06-rig-decision-agent`. It should add the
-Rig-backed implementation of the `ReplenishmentDecisionAgent` application port.
+The next branch is `tutorial/07-cli-workflow`. It should wire the runtime shell
+to the application service and infrastructure adapters so the commands actually
+run.
 
 When you finish the next branch, the repository should contain:
 
 ```text
 src/infrastructure/
-+-- agents/
-    +-- mod.rs
-    +-- rig_replenishment/
-        +-- mod.rs
++-- clock.rs
++-- ids.rs
+src/interfaces/
++-- cli.rs
+src/lib.rs
+src/main.rs
 ```
 
-The CLI may still return placeholder command errors. The goal is the decision
-agent adapter, not runtime wiring.
+The final tutorial branch should support:
 
-## Step By Step: Reach `tutorial/06-rig-decision-agent`
+```bash
+cargo run
+cargo run -- seed --reset
+cargo run -- simulate --days 7
+cargo run -- decide --horizon-days 14
+cargo run -- run-cycle --days 30 --decision-interval-days 7
+```
 
-### 1. Create The Agent Module
+## Step By Step: Reach `tutorial/07-cli-workflow`
+
+### 1. Add Clock And ID Adapters
 
 Create:
 
 ```text
-src/infrastructure/agents/mod.rs
-src/infrastructure/agents/rig_replenishment/mod.rs
+src/infrastructure/clock.rs
+src/infrastructure/ids.rs
 ```
 
 Update `src/infrastructure/mod.rs`:
 
 ```rust
-pub mod agents;
+pub mod clock;
+pub mod ids;
 ```
 
-The agent adapter belongs in infrastructure because it owns provider SDK types,
-prompt shape, Rig tools, and provider failure mapping.
+`SystemClock` should implement `Clock`.
 
-### 2. Implement The Application Port
+`UuidRetailIdGenerator` should implement `IdGenerator` and create typed:
 
-In `rig_replenishment/mod.rs`, define `RigReplenishmentDecisionAgent`.
+- `SalesOrderId`
+- `RestockOrderId`
+- `DecisionRunId`
 
-It should implement:
+Keep ID generation in infrastructure. Domain types validate IDs; they do not
+generate them.
+
+### 2. Map CLI Args Into Application Commands
+
+Update `src/interfaces/cli.rs` so parser structs build application commands:
+
+- `SeedArgs -> SeedRetailScenario`
+- `SimulateArgs -> AdvanceSimulation`
+- `DecideArgs -> RunRestockDecision`
+- `RunCycleArgs -> RunWorkflowCycle`
+
+Keep validation at the interface boundary for CLI-specific argument shape. Use
+domain constructors for typed horizons and quantities.
+
+### 3. Require OpenAI Key Only For Decision Commands
+
+Config should load without `OPENAI_API_KEY`.
+
+Add a helper such as:
 
 ```rust
-ReplenishmentDecisionAgent
+required_openai_key(config: &AppConfig) -> Result<String, CliError>
 ```
 
-Constructor inputs:
+Use it only for:
 
-- OpenAI API key.
-- chat model name.
+- `decide`
+- `run-cycle`
 
-The adapter should construct provider clients only when a decision command needs
-the agent in a later branch. `seed` and `simulate` must not require
-`OPENAI_API_KEY`.
+Do not require a provider key for:
 
-### 3. Add A Per-Decision Session
+- no subcommand help.
+- `seed`
+- `simulate`.
 
-Create an in-memory decision session that contains:
+### 4. Build Runtime Adapter Assembly
 
-- current `RetailSnapshot`.
-- ranked deterministic `RestockOption` values.
-- open restock orders.
-- profit summary.
-- max allowed proposals.
-- proposals collected during the model turn.
+Update `src/lib.rs::run()`:
 
-Tools should operate on this session. They should not write directly to Diesel.
+1. Load `.env`.
+2. Initialize tracing.
+3. Parse CLI.
+4. Render help and return if no subcommand is present.
+5. Load `AppConfig`.
+6. Create the SQLite pool from `retail_db_path`.
+7. Run embedded migrations.
+8. Build `DieselRetailStore`.
+9. Build `DieselDecisionRunStore`.
+10. Build `UuidRetailIdGenerator`.
+11. Build `SystemClock`.
+12. Build `RigReplenishmentDecisionAgent` only for decision commands.
+13. Dispatch to `RetailWorkflow`.
 
-### 4. Add Tool Surface
+Use an unavailable decision-agent placeholder for `seed` and `simulate` if the
+generic workflow type needs an agent but the command will not call it.
 
-Expose implementation-detail tools to the model:
+### 5. Keep `cargo run` No-Mutation
 
-- `get_inventory_snapshot`
-- `list_open_restock_orders`
-- `analyze_restock_options`
-- `place_restock_order`
-- `get_profit_summary`
+Running with no subcommand must:
 
-Tool behavior:
+- print help.
+- not load config.
+- not create a database pool.
+- not run migrations.
+- not require `OPENAI_API_KEY`.
+- not mutate state.
 
-- Snapshot tools return concise structured summaries.
-- `analyze_restock_options` returns deterministic candidates scored by Rust.
-- `place_restock_order` records a proposed SKU, quantity, and rationale in the
-  in-memory session.
-- Tools return validation feedback, but durable validation still happens in the
-  application use case.
+This is a core interface contract.
 
-### 5. Write The Prompt
+### 6. Add User-Facing Output
 
-Use an autonomous workflow prompt, not a chat-support prompt.
+Write concise command summaries:
 
-The prompt should tell the model to:
+- seed:
+  - scenario path.
+  - reset flag.
+- simulate:
+  - days advanced.
+  - final date.
+  - received restock count.
+  - sales count.
+  - lost units.
+- decide:
+  - decision run ID.
+  - accepted order count.
+  - rejected proposal count.
+  - summary.
+- run-cycle:
+  - days advanced.
+  - decision count.
+  - final date.
 
-- inspect inventory.
-- inspect ranked restock options.
-- inspect open inbound orders.
-- inspect profit summary.
-- place no more than the configured maximum number of restock orders.
-- include SKU, quantity, and short rationale for each proposal.
-- prefer high expected gross profit per occupied stock-space.
-- avoid duplicate inbound orders.
-- avoid capacity overflow.
+Direct stdout/stderr should stay in interface code or the binary edge.
 
-Do not log provider prompts or sensitive payloads.
-
-### 6. Return Application Models
-
-After the model turn, the adapter should return:
-
-```rust
-DecisionAgentResponse {
-    proposed_orders,
-    summary,
-}
-```
-
-The returned proposals are not trusted durable writes. `RetailWorkflow` already
-validates them before persistence.
-
-### 7. Map Provider Failures
-
-Provider and tool failures should map into `ApplicationError::AgentFailure`.
-
-Preserve the source error when available. Avoid collapsing failures into plain
-strings except at the outermost display boundary.
-
-### 8. Add Adapter Tests Without Network
-
-Normal tests must not call OpenAI.
+### 7. Add Interface Tests
 
 Good tests:
 
-- tool argument parsing records a proposal.
-- proposal quantity must be positive.
-- max proposal count is enforced in the session.
-- adapter failure mapping preserves an agent failure.
-- formatting of inventory/options/profit summaries is deterministic enough for
-  tests.
+- `no_subcommand_prints_help_without_mutating_state`
+- `seed_maps_reset_flag_to_application_command`
+- `simulate_rejects_zero_days`
+- `decide_requires_openai_key`
+- `run_cycle_rejects_zero_decision_interval`
+- command output formatting for each result type.
 
-Use fakes or narrow seams for provider behavior. Keep real network calls out of
-`cargo test`.
+Use fakes where possible. Do not call OpenAI in tests.
 
-### 9. Keep Application Boundaries Clean
+### 8. Run Local Workflow Checks
 
-Do not put Rig types into:
+Without a provider key:
 
-- domain APIs.
-- application commands.
-- application read models.
-- application ports.
+```bash
+cargo run
+cargo run -- seed --reset
+cargo run -- simulate --days 3
+```
 
-The only public application-facing type should remain the
-`ReplenishmentDecisionAgent` port and its request/response structs.
+With a valid provider key:
 
-### 10. Validate The Next Checkpoint
+```bash
+OPENAI_API_KEY=sk-your-key cargo run -- decide --horizon-days 14
+OPENAI_API_KEY=sk-your-key cargo run -- run-cycle --days 14 --decision-interval-days 7
+```
+
+Provider-backed commands are manual checks; normal automated tests should not
+need network access.
+
+### 9. Validate The Next Checkpoint
 
 Run:
 
@@ -318,15 +357,17 @@ cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 cargo run
+cargo run -- seed --reset
+cargo run -- simulate --days 3
 ```
 
 Expected state at the end:
 
-- Runtime help still works with no mutation.
-- Domain, application, persistence, and scenario tests still pass.
-- Agent adapter tests pass without network access.
-- The Rig adapter implements `ReplenishmentDecisionAgent`.
-- Durable writes still happen only in the application/persistence path.
+- Help prints with no mutation.
+- Seed creates SQLite state from YAML.
+- Simulate advances deterministic state.
+- Decision commands require `OPENAI_API_KEY`.
+- All normal tests pass without OpenAI or network access.
 
 ## Branch Ladder
 
