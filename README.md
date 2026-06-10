@@ -1,33 +1,33 @@
-# rigagent tutorial: 01 runtime cutover
+# rigagent tutorial: 02 domain model
 
-This branch is the second checkpoint in the `rigagent` build-along tutorial. It
-starts from `tutorial/00-start` and adds the runtime foundation: dependencies,
-strict lint posture, typed configuration loading, a Clap command shell, empty
-clean-architecture module boundaries, and tests for the behavior that exists so
-far.
+This branch is the third checkpoint in the `rigagent` build-along tutorial. It
+starts from `tutorial/01-runtime-cutover` and adds the framework-free retail
+domain model: value objects, entities, domain errors, deterministic demand
+simulation, and restock option scoring.
 
-There is still no retail domain model, no database adapter, no scenario loader,
-and no Rig agent implementation in this branch. Real workflow behavior begins
-in later checkpoints.
+The command-line runtime still has placeholder command dispatch. There is no
+application service, persistence adapter, scenario loader, or Rig agent yet.
 
 ## Current State
 
-The repository now has the shape that later branches will fill in:
+The repository now has a real domain center:
 
 ```text
 rigagent/
-+-- AGENTS.md
-+-- Cargo.lock
-+-- Cargo.toml
 +-- config.yaml
-+-- README.md
 +-- src/
     +-- main.rs
     +-- lib.rs
     +-- config.rs
-    +-- application/
-    |   +-- mod.rs
     +-- domain/
+    |   +-- mod.rs
+    |   +-- retail/
+    |       +-- mod.rs
+    |       +-- errors.rs
+    |       +-- value_objects.rs
+    |       +-- entities.rs
+    |       +-- services.rs
+    +-- application/
     |   +-- mod.rs
     +-- infrastructure/
     |   +-- mod.rs
@@ -36,82 +36,128 @@ rigagent/
         +-- cli.rs
 ```
 
-The binary entrypoint is intentionally thin. `src/main.rs` starts Tokio, calls
-`rigagent::run()`, writes the final process error to stderr, and returns the
-mapped exit code.
+The dependency direction is still simple:
 
-`src/lib.rs::run()` owns the early runtime flow:
+```text
+interfaces -> runtime shell
+domain -> standard library + chrono + thiserror
+```
 
-1. Load `.env` for local development.
-2. Initialize tracing.
-3. Parse CLI arguments.
-4. If no subcommand is present, render help and exit successfully.
-5. Load common config only after a real subcommand is present.
-6. Validate basic command arguments.
-7. Return a placeholder error for commands that later branches will implement.
+The domain does not import application, infrastructure, interfaces, Diesel, Rig,
+Clap, config loading, tracing, `tokio`, environment variables, provider DTOs, or
+serde.
 
-Run the branch:
+## What This Branch Adds
+
+### Domain Errors
+
+`src/domain/retail/errors.rs` defines `DomainError`, including variants for:
+
+- Empty or invalid text fields.
+- Non-positive or out-of-range numeric values.
+- Arithmetic overflow and insufficient values.
+- Restock quantities outside product bounds.
+- Capacity overflow.
+- Invalid restock-order transitions.
+- Receiving restock orders before ETA.
+- Invalid decision-run transitions.
+- Invalid fixed-point demand backlog.
+- Date arithmetic overflow.
+- Fulfilled sales exceeding requested sales.
+- Unit price below unit cost.
+
+These errors describe business failures, not transport or adapter failures.
+
+### Value Objects
+
+`src/domain/retail/value_objects.rs` adds strong types for retail concepts:
+
+- `Sku`
+- `Brand`
+- `ApparelKind`
+- `SizeLabel`
+- `MoneyCents`
+- `SpaceUnits`
+- `StockQuantity`
+- `DemandRatePerDay`
+- `DemandBacklog`
+- `LeadTimeDays`
+- `DecisionHorizonDays`
+- `SimulationDate`
+- `SalesOrderId`
+- `RestockOrderId`
+- `DecisionRunId`
+
+Important rules:
+
+- SKUs are trimmed, non-empty, and canonical uppercase.
+- Demand uses fixed-point milli-units, not floats.
+- Lead times and decision horizons are positive and bounded.
+- Dates use checked arithmetic through `SimulationDate`.
+- Money, space, and stock operations use checked arithmetic where overflow is
+  possible.
+- Standard traits such as `FromStr`, `TryFrom`, and `Display` define canonical
+  conversions.
+
+### Entities
+
+`src/domain/retail/entities.rs` adds:
+
+- `Product`
+- `InventoryPosition`
+- `SalesOrder`
+- `RestockOrder`
+- `DecisionRun`
+
+Business behavior lives on the owning type:
+
+- `product.unit_margin()`
+- `product.restock_eta(current_date)`
+- `product.bounded_order_quantity(quantity)`
+- `inventory.receive_restock(quantity)`
+- `inventory.apply_demand_simulation(simulation)`
+- `inventory.occupied_space(product)`
+- `restock_order.receive(on_date)`
+- `decision_run.complete(summary, created_count)`
+- `decision_run.fail(summary)`
+
+Fields are private on domain entities. Construction and mutation go through
+validated constructors and intention-revealing behavior methods.
+
+### Domain Services
+
+`src/domain/retail/services.rs` adds:
+
+- `DemandSimulator`: converts daily demand plus carried backlog into whole
+  requested units and a remaining backlog.
+- `RestockOptionScorer`: scores deterministic restock candidates by expected
+  gross profit and occupied stock-space.
+
+The scorer keeps arithmetic in Rust. A later Rig adapter may choose among ranked
+options, but the model will not own the business math.
+
+## Runtime Behavior
+
+The runtime shell still behaves as it did in the previous branch:
 
 ```bash
 cargo run
 ```
 
-Expected behavior: command help is printed, config is not loaded, no database is
+Expected behavior: command help is printed, no config is loaded, no database is
 opened, and no state is mutated.
 
-Try a parsed-but-unimplemented command:
+Real commands still return placeholder errors:
 
 ```bash
 cargo run -- simulate --days 1
 ```
 
-Expected behavior: the CLI validates the command and reports that `simulate` is
-not implemented until a later tutorial branch.
+Expected behavior:
 
-## Runtime Contracts
-
-The branch introduces the final command surface:
-
-```bash
-cargo run
-cargo run -- seed --reset
-cargo run -- simulate --days 7
-cargo run -- decide --horizon-days 14
-cargo run -- run-cycle --days 30 --decision-interval-days 7
+```text
+simulate is parsed but not implemented until a later tutorial branch
 ```
-
-Only the shell exists in this checkpoint. These commands parse, but the real
-use cases do not exist yet.
-
-`config.yaml` contains the non-secret settings that later branches will use:
-
-```yaml
-chat_model: gpt-5-nano
-retail_db_path: data/retail.sqlite
-retail_scenario_path: data/retail_scenario.yaml
-decision_horizon_days: 14
-max_restock_orders_per_decision: 2
-```
-
-`OPENAI_API_KEY` is represented as an optional config field but is not required
-for common config loading. That matters because `seed` and `simulate` will not
-need provider access later.
-
-Environment variables override YAML fields:
-
-```bash
-CHAT_MODEL=gpt-5-mini cargo run -- seed
-```
-
-This branch keeps the strict correctness lint posture: no unsafe code, unwraps,
-expects, panics, todos, debug macros, unchecked casts, unchecked arithmetic, or
-direct stdout/stderr printing outside the interface boundary. It enables
-`clippy::pedantic` and `clippy::nursery`.
-
-`clippy::cargo` is not enabled in this checkpoint because the planned dependency
-set pulls duplicate transitive crates before this tutorial owns any adapter code
-that can reduce that graph. Keep the correctness lints green first; revisit
-dependency-tree cleanup when the infrastructure branches are in place.
 
 ## Validate This Branch
 
@@ -124,314 +170,258 @@ cargo test --all-features
 cargo run
 ```
 
-The test suite covers:
+The test suite now covers both the runtime shell and domain behavior:
 
-- Help rendering with no subcommand.
-- Environment variables overriding YAML config.
-- Loading common config without `OPENAI_API_KEY`.
-- Rejecting zero simulation days.
-- Rejecting a zero decision interval.
-- Rejecting a zero default decision horizon.
-- Parsing the final subcommand surface.
+- Config loads without requiring `OPENAI_API_KEY`.
+- CLI help renders with no subcommand.
+- Zero day and interval arguments are rejected.
+- Empty SKUs are rejected.
+- Decimal demand rates parse without float arithmetic.
+- Fractional demand backlog carries across days.
+- Product prices below cost are rejected.
+- Restock quantities are checked against product bounds.
+- Inventory capacity is enforced.
+- Restock orders receive only through valid transitions.
+- Sales profit is computed with checked cents arithmetic.
+- Restock options are scored and capped by product and capacity rules.
 
 ## Goal For The Next Branch
 
-The next branch is `tutorial/02-domain-model`. It should add the retail domain
-language and deterministic business rules, while still avoiding Diesel, Rig,
-Clap, config, tracing, environment variables, async runtimes, and provider
-payloads in the domain layer.
+The next branch is `tutorial/03-application-layer`. It should add use cases and
+ports around the domain model without introducing Diesel, Rig, YAML DTOs, or CLI
+business logic.
 
 When you finish the next branch, the repository should contain:
 
-- `src/domain/retail/mod.rs`
-- `src/domain/retail/errors.rs`
-- `src/domain/retail/value_objects.rs`
-- `src/domain/retail/entities.rs`
-- `src/domain/retail/services.rs`
-- Domain tests for validation, state transitions, demand simulation, and
-  restock scoring.
-
-The CLI should still return placeholder errors for real commands. The goal of
-the next branch is not to wire the application yet. It is to make the retail
-rules explicit and testable in isolation.
-
-## Step By Step: Reach `tutorial/02-domain-model`
-
-### 1. Create The Retail Domain Module
-
-Create the module tree:
-
 ```text
-src/domain/
+src/application/
 +-- mod.rs
 +-- retail/
     +-- mod.rs
+    +-- commands.rs
     +-- errors.rs
-    +-- value_objects.rs
-    +-- entities.rs
-    +-- services.rs
+    +-- ports.rs
+    +-- read_models.rs
+    +-- use_cases.rs
 ```
 
-Update `src/domain/mod.rs`:
+The application layer should coordinate workflows and define outbound ports for
+side effects. It should not know about database rows, Rig tools, Clap structs,
+config loader internals, or provider payloads.
+
+## Step By Step: Reach `tutorial/03-application-layer`
+
+### 1. Create The Retail Application Module
+
+Create:
+
+```text
+src/application/retail/mod.rs
+src/application/retail/commands.rs
+src/application/retail/errors.rs
+src/application/retail/ports.rs
+src/application/retail/read_models.rs
+src/application/retail/use_cases.rs
+```
+
+Update `src/application/mod.rs`:
 
 ```rust
 pub mod retail;
 ```
 
-Keep all domain files free of runtime and adapter concerns. Do not import
-Diesel, Rig, Clap, config, tracing, `tokio`, provider DTOs, or environment
-helpers.
+`mod.rs` should re-export the public application API that later infrastructure
+and interface code will use.
 
-### 2. Add `DomainError`
+### 2. Add Commands
 
-In `src/domain/retail/errors.rs`, define a crate-owned error enum with
-`thiserror`.
+In `commands.rs`, define typed command structs:
 
-Start with variants for:
+- `SeedRetailScenario`
+  - scenario path.
+  - reset flag.
+- `AdvanceSimulation`
+  - number of days to advance.
+- `RunRestockDecision`
+  - `DecisionHorizonDays`.
+  - max restock orders.
+- `RunWorkflowCycle`
+  - total days.
+  - decision interval days.
+  - decision horizon.
+  - max restock orders.
 
-- Empty or invalid text fields.
-- Invalid dates.
-- Invalid money, quantity, capacity, or demand values.
-- Arithmetic overflow.
-- Quantity outside a product's order bounds.
-- Invalid restock-order status transitions.
-- Invalid decision-run status transitions.
+Keep CLI-specific argument structs out of the application layer. The interface
+branch will map CLI args into these typed commands.
 
-Errors should describe domain failures, not transport failures. For example,
-prefer `QuantityOutsideBounds { requested, min, max }` over a generic string.
+### 3. Add Read Models
 
-### 3. Add Strong Value Objects
+In `read_models.rs`, define stable application outputs:
 
-In `value_objects.rs`, add types that make invalid state hard to construct.
+- `RetailSnapshot`
+- `ProfitSummary`
+- `AdvanceSimulationResult`
+- `DecisionResult`
+- `WorkflowCycleResult`
+- `EventCount`
+- accepted and rejected restock proposal models.
 
-Recommended first set:
+Read models may contain domain types such as `Sku`, `Product`,
+`InventoryPosition`, `RestockOrder`, `SimulationDate`, and `MoneyCents`.
+They should not contain Diesel rows, provider payloads, or Clap types.
 
-- `Sku`: trim input, reject empty values, canonicalize to uppercase.
-- `Brand`: trim input and reject empty display names.
-- `ApparelKind`: closed enum such as `Shirt`, `Pants`, `Jacket`, `Dress`,
-  `Shoes`, and `Accessory`.
-- `SizeLabel`: validated size label.
-- `MoneyCents`: non-negative cents.
-- `SpaceUnits`: non-negative stock-space units.
-- `StockQuantity`: non-negative item quantity.
-- `DemandRatePerDay`: fixed-point milli-units per day.
-- `DemandBacklog`: carried fixed-point milli-units.
-- `LeadTimeDays`: positive bounded day count.
-- `DecisionHorizonDays`: positive bounded day count.
-- `SimulationDate`: checked date wrapper around `chrono::NaiveDate`.
-- `SalesOrderId`, `RestockOrderId`, and `DecisionRunId`: typed IDs backed by
-  validated strings.
+### 4. Add Application Errors
 
-Implement standard conversions where they fit:
+In `errors.rs`, define `ApplicationError`.
 
-- `TryFrom<&str>` or `FromStr` for parsed value objects.
-- `TryFrom<u64>` or `TryFrom<i64>` for bounded numeric inputs.
-- `Display` for canonical output.
-- `From<T>` only when construction is infallible.
+It should include:
 
-Do not add ad hoc helpers such as `to_domain`, `from_row`, or `as_model`.
-Boundary conversions in later branches should use `From`, `TryFrom`,
-`FromStr`, and `Display`.
+- `Domain(#[from] DomainError)`
+- state already exists.
+- SKU not found.
+- inactive product.
+- inventory not found.
+- duplicate open restock order.
+- capacity overflow proposal.
+- proposal outside product bounds.
+- missing decision run.
+- non-positive command fields.
+- count overflow.
+- port failures for store, decision-run store, clock, and decision agent.
 
-### 4. Keep Arithmetic Explicit
+Application errors should preserve source failures from ports without depending
+on concrete infrastructure error types. A small shared source wrapper is
+acceptable when you need cloneable errors for tests and read models.
 
-The domain must not use floats for demand or scoring.
+### 5. Define Ports
 
-Use fixed-point milli-units:
+In `ports.rs`, define narrow traits around behavior, not generic CRUD.
 
-```text
-1 unit/day = 1000 milli-units/day
-2.750 units/day = 2750 milli-units/day
-```
+Recommended ports:
 
-Add methods that use checked or saturating arithmetic where overflow is
-possible:
+- `RetailStore`
+  - state exists.
+  - load snapshot.
+  - seed scenario.
+  - receive due restocks.
+  - record one sales day.
+  - place accepted restock orders.
+  - open restock orders.
+  - profit summary.
+  - advance logical shop date.
+- `DecisionRunStore`
+  - start decision run.
+  - complete decision run.
+  - fail decision run.
+  - load decision run.
+- `ReplenishmentDecisionAgent`
+  - accept a typed decision request.
+  - return proposed orders and a summary.
+- `Clock`
+  - return today's date where real calendar time is needed.
+- `IdGenerator`
+  - generate sales, restock, and decision IDs.
 
-- checked money addition and multiplication by quantity.
-- checked stock and space addition.
-- checked stock subtraction for fulfillment.
-- checked date addition for ETA calculations.
+Use constructor injection later. Do not use globals or hidden environment reads.
 
-Avoid `as` casts. Use `TryFrom`, `From`, or typed constructors.
+### 6. Implement `RetailWorkflow`
 
-### 5. Add Product And Inventory Entities
-
-In `entities.rs`, start with `Product` and `InventoryPosition`.
-
-`Product` should own:
-
-- SKU.
-- apparel kind.
-- brand.
-- size.
-- unit cost.
-- unit price.
-- space units.
-- demand rate.
-- restock lead time.
-- min and max order quantities.
-- active state.
-
-Product behavior:
-
-- `unit_margin()`
-- `restock_eta(current_date)`
-- `bounded_order_quantity(requested_quantity)`
-- `is_active()`
-
-`InventoryPosition` should own:
-
-- SKU.
-- on-hand quantity.
-- demand backlog.
-
-Inventory behavior:
-
-- `receive_restock(quantity)`
-- `fulfill_demand(requested_units)`
-- `occupied_space(product)`
-- backlog access and update through intention-revealing methods.
-
-Keep fields private. Expose constructors, accessors, and behavior methods that
-preserve invariants.
-
-### 6. Add Sales, Restock Orders, And Decision Runs
-
-Still in `entities.rs`, add the lifecycle entities.
-
-`SalesOrder` records:
-
-- ID.
-- sale date.
-- SKU.
-- requested units.
-- fulfilled units.
-- lost units.
-- revenue.
-- cost.
-
-Rules:
-
-- Fulfilled units cannot exceed requested units.
-- Lost units are requested minus fulfilled units.
-- Revenue is fulfilled quantity times unit price.
-- Cost is fulfilled quantity times unit cost.
-- Gross profit is revenue minus cost.
-
-`RestockOrder` records:
-
-- ID.
-- SKU.
-- quantity.
-- order date.
-- ETA.
-- status: `Open`, `Received`, or `Cancelled`.
-- decision run ID.
-- rationale.
-
-Rules:
-
-- New orders start as `Open`.
-- Quantity must be positive.
-- Rationale must be non-empty.
-- `receive(on_date)` only succeeds for open orders whose ETA has arrived.
-- Received or cancelled orders cannot be received again.
-
-`DecisionRun` records:
-
-- ID.
-- decision date.
-- horizon.
-- status: `Started`, `Completed`, or `Failed`.
-- summary.
-- created restock count.
-
-Rules:
-
-- New runs start as `Started`.
-- Started runs can complete or fail.
-- Completed and failed runs cannot transition again.
-
-### 7. Add Demand Simulation
-
-In `services.rs`, add `DemandSimulator`.
-
-It should convert:
+In `use_cases.rs`, create a generic application service:
 
 ```text
-DemandRatePerDay + DemandBacklog -> requested whole units + next backlog
+RetailWorkflow<RetailStore, DecisionRunStore, ReplenishmentDecisionAgent, IdGenerator, Clock>
 ```
 
-Example:
+Use cases to implement:
 
-```text
-rate = 1250 milli-units
-backlog = 500 milli-units
-total = 1750 milli-units
-requested = 1 unit
-next backlog = 750 milli-units
+- `seed_scenario`
+  - fail if state exists and reset is false.
+  - delegate durable seeding to the store port.
+- `advance_simulation`
+  - load current snapshot.
+  - receive due restocks before sales.
+  - run deterministic demand per active product.
+  - create sales orders through generated IDs.
+  - update inventory through domain behavior.
+  - record the sales day.
+  - advance the logical shop date.
+- `run_restock_decision`
+  - start a decision run.
+  - load snapshot.
+  - score deterministic restock options.
+  - call the decision agent port.
+  - validate every proposal against domain/application rules.
+  - persist accepted orders.
+  - complete or fail the decision run.
+- `run_workflow_cycle`
+  - run an initial decision on day zero.
+  - simulate one day at a time.
+  - run another decision each configured interval.
+
+Keep transactions visible at the application/infrastructure boundary. The
+application decides which operations must be atomic; the infrastructure branch
+will implement that with Diesel.
+
+### 7. Validate Agent Proposals In Application Code
+
+The decision agent will not be trusted with durable writes.
+
+Reject proposals when:
+
+- SKU is unknown.
+- product is inactive.
+- quantity is zero.
+- quantity is outside product min/max bounds.
+- SKU already has an open restock order.
+- projected inventory would exceed stock-space capacity.
+
+Return rejected proposal details in `DecisionResult`. Do not persist rejected
+proposals in this tutorial stage.
+
+### 8. Add Deterministic Fakes For Tests
+
+Application tests should not use Diesel, Rig, network, or filesystem state.
+
+Add hand-written fakes for:
+
+- `RetailStore`
+- `DecisionRunStore`
+- `ReplenishmentDecisionAgent`
+- `Clock`
+- `IdGenerator`
+
+Fakes should store domain types, not database rows. They should enforce enough
+behavior to keep tests honest and support explicit failure injection for the
+important paths.
+
+### 9. Add Application Tests
+
+Good first tests:
+
+- `seed_requires_reset_when_state_exists`
+- `advance_simulation_receives_due_restock_before_sales`
+- `advance_simulation_records_lost_sales`
+- `run_decision_persists_accepted_agent_proposals`
+- `run_decision_rejects_capacity_overflow_proposal`
+- `run_decision_marks_run_failed_on_agent_error`
+- `run_cycle_decides_on_day_zero_and_each_interval`
+
+Test through public use-case behavior. Avoid tests that only restate private
+helper logic.
+
+### 10. Keep The Runtime Placeholder
+
+The next branch may add the application layer without wiring it into the CLI.
+It is acceptable for:
+
+```bash
+cargo run -- simulate --days 1
 ```
 
-This service should be deterministic and synchronous. It should not know about
-databases, clocks, CLI arguments, or model calls.
+to still return the placeholder command error. CLI-to-application wiring belongs
+to a later branch.
 
-### 8. Add Restock Option Scoring
-
-In `services.rs`, add `RestockOptionScorer`.
-
-Inputs should be domain objects or small domain read models:
-
-- products.
-- current inventory positions.
-- open inbound restock quantities.
-- current simulation date.
-- decision horizon.
-- total stock-space capacity.
-
-Eligibility rules:
-
-- Product must be active.
-- ETA must fall within the decision horizon.
-- Remaining capacity must support at least the product minimum order quantity.
-- Expected incremental sold units must be positive.
-
-Quantity rules:
-
-- Convert remaining free space into SKU units using product `space_units`.
-- Cap by product `max_order_quantity`.
-- Require at least product `min_order_quantity`.
-- Validate through `product.bounded_order_quantity`.
-
-Ranking rules:
-
-- Primary: expected gross profit per occupied space.
-- Tie-breaker: absolute expected gross profit.
-- Final tie-breaker: SKU order.
-
-Keep scoring deterministic. The LLM will choose among ranked options later, but
-the arithmetic belongs in Rust.
-
-### 9. Add Domain Tests
-
-Write tests close to the domain behavior. Good first tests:
-
-- `rejects_empty_sku`
-- `canonicalizes_sku`
-- `parses_decimal_demand_rate_without_float_arithmetic`
-- `carries_fractional_demand_backlog`
-- `rejects_product_price_below_cost`
-- `rejects_restock_quantity_outside_product_bounds`
-- `receives_open_restock_order`
-- `rejects_receiving_cancelled_restock_order`
-- `rejects_receiving_before_eta`
-- `prevents_inventory_from_exceeding_capacity`
-- `computes_profit_with_checked_cents_arithmetic`
-- `ranks_restock_options_by_profit_per_space`
-
-Test through public constructors and behavior methods. Avoid tests that only
-repeat private implementation details.
-
-### 10. Validate The Next Checkpoint
+### 11. Validate The Next Checkpoint
 
 Run:
 
@@ -444,11 +434,11 @@ cargo run
 
 Expected state at the end:
 
-- `cargo run` still shows help with no mutation.
-- The CLI still returns placeholder errors for real commands.
-- Domain tests pass without requiring a database, OpenAI key, network, or async
-  runtime.
-- Domain APIs expose retail concepts and not adapter concerns.
+- Runtime help still works with no mutation.
+- Domain tests still pass.
+- Application tests pass using fakes only.
+- Application APIs expose commands, read models, use cases, and ports.
+- No application API exposes Diesel, Rig, Clap, YAML DTOs, or provider payloads.
 
 ## Branch Ladder
 
