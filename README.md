@@ -28,7 +28,7 @@ Suggested cumulative learner branches:
 | `tutorial/05-scenario-seeding` | YAML scenario loading and the `seed` workflow. |
 | `tutorial/06-rig-decision-agent` | Rig-backed replenishment adapter and decision-session tools. |
 | `tutorial/07-cli-workflow` | CLI commands, config wiring, migrations on startup, and workflow dispatch. |
-| `master` | Finished implementation, documentation, and validation gates. |
+| `master` | Finished implementation, status reporting, documentation, and validation gates. |
 
 When these branches exist, learners can inspect each stage with:
 
@@ -83,6 +83,12 @@ Seed the retail database from the scenario YAML:
 
 ```bash
 cargo run -- seed --reset
+```
+
+Inspect stock health, inbound restocks, and financial summary:
+
+```bash
+cargo run -- status
 ```
 
 Advance deterministic sales simulation without calling a model:
@@ -537,6 +543,7 @@ Implement `src/config.rs`:
 Implement `src/interfaces/cli.rs`:
 
 - `seed --reset`
+- `status`
 - `simulate --days N`
 - `decide --horizon-days N`
 - `run-cycle --days N --decision-interval-days M`
@@ -544,6 +551,9 @@ Implement `src/interfaces/cli.rs`:
 Interface behavior:
 
 - `cargo run` prints help and does not load config or mutate state.
+- `status` loads the current `RetailSnapshot` and reports stock, capacity,
+  inbound restocks, revenue, gross profit, lost units, and sales count without
+  calling a model.
 - Count and interval arguments must be greater than zero.
 - User-facing output is a concise one-line summary.
 - Interface errors map application failures into clear exit codes.
@@ -562,6 +572,7 @@ Checkpoint:
 ```bash
 cargo run
 cargo run -- seed --reset
+cargo run -- status
 cargo run -- simulate --days 7
 OPENAI_API_KEY=sk-your-key cargo run -- decide --horizon-days 14
 OPENAI_API_KEY=sk-your-key cargo run -- run-cycle --days 14 --decision-interval-days 7
@@ -589,7 +600,9 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 cargo run -- --help
 cargo run -- seed --reset
+cargo run -- status
 cargo run -- simulate --days 3
+cargo run -- status
 ```
 
 With a valid provider key:
@@ -621,10 +634,12 @@ Before considering a stage complete, check these points:
 ```bash
 cargo run
 cargo run -- seed --reset
+cargo run -- status
 cargo run -- simulate --days 7
 cargo run -- decide --horizon-days 14
 cargo run -- run-cycle --days 30 --decision-interval-days 7
 ```
 
-`seed` and `simulate` do not require `OPENAI_API_KEY`. `decide` and `run-cycle`
-do require it because they construct the Rig-backed replenishment adapter.
+`seed`, `status`, and `simulate` do not require `OPENAI_API_KEY`. `decide` and
+`run-cycle` do require it because they construct the Rig-backed replenishment
+adapter.
