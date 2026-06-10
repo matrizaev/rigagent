@@ -60,7 +60,7 @@ Running with no subcommand prints help and performs no mutation.
 The non-secret runtime defaults are in `config.yaml`:
 
 ```yaml
-chat_model: gpt-5-nano
+chat_model: gpt-5.4-nano
 retail_db_path: data/retail.sqlite
 retail_scenario_path: data/retail_scenario.yaml
 decision_horizon_days: 14
@@ -555,7 +555,9 @@ Interface behavior:
   inbound restocks, revenue, gross profit, lost units, and sales count without
   calling a model.
 - Count and interval arguments must be greater than zero.
-- User-facing output is a concise one-line summary.
+- User-facing output is compact text: `seed`, `simulate`, and `run-cycle` print
+  one-line summaries, while `status` and `decide` include detail lines when
+  there is useful state or proposal feedback to show.
 - Interface errors map application failures into clear exit codes.
 
 Wire `src/lib.rs::run()`:

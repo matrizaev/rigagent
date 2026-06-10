@@ -40,9 +40,10 @@ The binary supports these commands:
 ```bash
 cargo run
 cargo run -- seed [--reset]
+cargo run -- status
 cargo run -- simulate --days N
 cargo run -- decide [--horizon-days N]
-cargo run -- run-cycle --days N --decision-interval-days M [--horizon-days N]
+cargo run -- run-cycle --days N --decision-interval-days M
 ```
 
 Default behavior:
@@ -53,14 +54,16 @@ Default behavior:
 
 Common behavior:
 
-- Mutating commands load `config.yaml` plus environment overrides.
+- All subcommands load `config.yaml` plus environment overrides.
 - Commands that access retail state run embedded Diesel migrations before use.
-- User-facing output is a concise one-line summary.
+- User-facing output is compact text. `seed`, `simulate`, and `run-cycle` print
+  one-line summaries; `status` prints a compact state report; `decide` prints a
+  decision summary and accepted/rejected proposal details when present.
 - Argument values that represent counts or intervals must be greater than zero.
 
 Provider-key behavior:
 
-- `seed` and `simulate` do not require `OPENAI_API_KEY`.
+- `seed`, `status`, and `simulate` do not require `OPENAI_API_KEY`.
 - `decide` and `run-cycle` require `OPENAI_API_KEY`.
 - Missing provider key for decision commands exits as an interface argument
   failure.
@@ -70,7 +73,7 @@ Provider-key behavior:
 Required non-secret configuration:
 
 ```yaml
-chat_model: gpt-5-nano
+chat_model: gpt-5.4-nano
 retail_db_path: data/retail.sqlite
 retail_scenario_path: data/retail_scenario.yaml
 decision_horizon_days: 14

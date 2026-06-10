@@ -10,9 +10,10 @@ decision agent for supplier restock proposals, validates those proposals in Rust
 and persists accepted restock orders in SQLite through Diesel.
 
 The application is intentionally not a chat assistant or REPL. The binary is a
-workflow runner with four commands:
+workflow runner with five commands:
 
 - `seed`: create retail state from scenario YAML.
+- `status`: show current stock, inbound restocks, and profit health.
 - `simulate`: advance deterministic sales and inventory state.
 - `decide`: run one replenishment decision.
 - `run-cycle`: run repeated simulation and decision turns.
@@ -215,6 +216,17 @@ CLI -> lib.rs -> migrations -> RetailWorkflow::seed_scenario
 The seed operation loads scenario YAML, converts DTOs into domain types, and
 inserts shop state, products, and inventory in one transaction.
 
+### Status
+
+```text
+CLI -> lib.rs -> migrations -> RetailWorkflow::get_snapshot
+    -> RetailStore::load_snapshot
+    -> render stock, capacity, inbound restocks, and profit summary
+```
+
+The status operation reads durable state and does not construct the Rig-backed
+decision adapter.
+
 ### Simulate
 
 ```text
@@ -279,7 +291,7 @@ Agent adapter:
 
 - `RigReplenishmentDecisionAgent` implements `ReplenishmentDecisionAgent`.
 - It is constructed only for `decide` and `run-cycle`.
-- `OPENAI_API_KEY` is not required for `seed` or `simulate`.
+- `OPENAI_API_KEY` is not required for `seed`, `status`, or `simulate`.
 - Rig tools operate on an in-memory `DecisionSession`.
 - Tool names are adapter details:
   - `get_inventory_snapshot`
@@ -328,7 +340,7 @@ types through application ports.
 `config.yaml` stores non-secret defaults:
 
 ```yaml
-chat_model: gpt-5-nano
+chat_model: gpt-5.4-nano
 retail_db_path: data/retail.sqlite
 retail_scenario_path: data/retail_scenario.yaml
 decision_horizon_days: 14
