@@ -71,6 +71,21 @@ validation command strict and reproducible:
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
+### Final Source Alignment
+
+This checkpoint also removes a few tutorial-only rough edges so `src/` matches
+the final reference implementation:
+
+- `src/config.rs` uses final-state documentation and keeps test-only config
+  builders inside tests.
+- `src/main.rs` uses the final binary wording and preserves the application
+  error exit code after writing to stderr.
+- `src/interfaces/mod.rs` and `src/infrastructure/persistence/mod.rs` match the
+  final module documentation and formatting.
+
+These changes do not add new workflow behavior; they keep the last tutorial
+checkpoint aligned with `master`.
+
 ### Runtime Wiring
 
 `src/lib.rs::run()` now:
