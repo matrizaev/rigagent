@@ -24,6 +24,7 @@ The repository now includes the complete vertical slice:
 ```text
 rigagent/
 +-- config.yaml
++-- clippy.toml
 +-- data/
 |   +-- retail_scenario.yaml
 +-- migrations/
@@ -56,6 +57,19 @@ The domain remains free of Diesel, Rig, Clap, config loading, environment
 variables, async runtimes, provider payloads, and tracing.
 
 ## What This Branch Adds
+
+### Final Lint Configuration
+
+Branch 07 matches the final reference lint posture by enabling
+`clippy::cargo` at the crate root and adding `clippy.toml` with the explicit
+duplicate-crate allowlist needed by the current dependency graph.
+
+This is not part of the retail workflow behavior. It keeps the documented
+validation command strict and reproducible:
+
+```bash
+cargo clippy --all-targets --all-features -- -D warnings
+```
 
 ### Runtime Wiring
 
