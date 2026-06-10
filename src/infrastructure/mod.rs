@@ -1,7 +1,13 @@
-//! External adapters for persistence, provider calls, IDs, clocks, and files.
+//! External adapters for the retail workflow.
+
+/// Clock adapters.
+pub mod clock;
 
 /// Decision-agent adapters.
 pub mod agents;
+
+/// Identifier adapters.
+pub mod ids;
 
 /// Diesel-backed persistence adapters.
 pub mod persistence;

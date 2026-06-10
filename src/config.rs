@@ -6,16 +6,16 @@ use ::config::{Config, Environment, File};
 use serde::Deserialize;
 
 /// Retail workflow runtime configuration.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct AppConfig {
-    /// Optional provider key used only by decision commands in later branches.
+    /// Optional provider key used only by decision commands.
     #[serde(default)]
     pub openai_api_key: Option<String>,
-    /// Chat model used by the Rig-backed decision agent in later branches.
+    /// Chat model used by the Rig-backed decision agent.
     pub chat_model: String,
-    /// `SQLite` database path for durable retail state in later branches.
+    /// `SQLite` database path for durable retail state.
     pub retail_db_path: PathBuf,
-    /// Scenario YAML path used by the seed command in later branches.
+    /// Scenario YAML path used by the seed command.
     pub retail_scenario_path: PathBuf,
     /// Default demand horizon for restock decisions.
     pub decision_horizon_days: u64,
@@ -30,17 +30,11 @@ impl AppConfig {
     ///
     /// Returns an error when required common configuration is missing or invalid.
     pub fn load() -> Result<Self, ::config::ConfigError> {
-        Self::from_builder(
-            Config::builder()
-                .add_source(File::with_name("config"))
-                .add_source(Environment::default().ignore_empty(true).try_parsing(true)),
-        )
-    }
-
-    fn from_builder(
-        builder: ::config::ConfigBuilder<::config::builder::DefaultState>,
-    ) -> Result<Self, ::config::ConfigError> {
-        builder.build()?.try_deserialize()
+        Config::builder()
+            .add_source(File::with_name("config"))
+            .add_source(Environment::default().ignore_empty(true).try_parsing(true))
+            .build()?
+            .try_deserialize()
     }
 }
 
@@ -50,34 +44,30 @@ mod tests {
 
     use ::config::FileFormat;
 
-    use super::AppConfig;
+    use super::*;
 
     #[test]
     fn environment_overrides_yaml() -> Result<(), Box<dyn std::error::Error>> {
         let env = HashMap::from([
-            ("OPENAI_API_KEY".to_owned(), "sk-demo".to_owned()),
-            ("CHAT_MODEL".to_owned(), "gpt-test".to_owned()),
-            ("DECISION_HORIZON_DAYS".to_owned(), "21".to_owned()),
+            ("OPENAI_API_KEY".to_string(), "sk-demo".to_string()),
+            ("CHAT_MODEL".to_string(), "gpt-test".to_string()),
+            ("DECISION_HORIZON_DAYS".to_string(), "21".to_string()),
         ]);
 
-        let config = AppConfig::from_builder(
-            ::config::Config::builder()
-                .add_source(::config::File::from_str(
-                    r"
-                    chat_model: gpt-yaml
-                    retail_db_path: data/test.sqlite
-                    retail_scenario_path: data/retail_scenario.yaml
-                    decision_horizon_days: 14
-                    max_restock_orders_per_decision: 2
-                    ",
-                    FileFormat::Yaml,
-                ))
-                .add_source(
-                    ::config::Environment::default()
-                        .try_parsing(true)
-                        .source(Some(env)),
-                ),
-        )?;
+        let config: AppConfig = Config::builder()
+            .add_source(File::from_str(
+                r"
+                chat_model: gpt-yaml
+                retail_db_path: data/test.sqlite
+                retail_scenario_path: data/retail_scenario.yaml
+                decision_horizon_days: 14
+                max_restock_orders_per_decision: 2
+                ",
+                FileFormat::Yaml,
+            ))
+            .add_source(Environment::default().try_parsing(true).source(Some(env)))
+            .build()?
+            .try_deserialize()?;
 
         assert_eq!(config.openai_api_key, Some("sk-demo".to_owned()));
         assert_eq!(config.chat_model, "gpt-test");
@@ -87,8 +77,8 @@ mod tests {
 
     #[test]
     fn missing_openai_key_still_loads_common_config() -> Result<(), Box<dyn std::error::Error>> {
-        let config = AppConfig::from_builder(::config::Config::builder().add_source(
-            ::config::File::from_str(
+        let config = Config::builder()
+            .add_source(File::from_str(
                 r"
                 chat_model: gpt-test
                 retail_db_path: data/test.sqlite
@@ -97,8 +87,9 @@ mod tests {
                 max_restock_orders_per_decision: 2
                 ",
                 FileFormat::Yaml,
-            ),
-        ))?;
+            ))
+            .build()?
+            .try_deserialize::<AppConfig>()?;
 
         assert_eq!(config.openai_api_key, None);
         Ok(())
